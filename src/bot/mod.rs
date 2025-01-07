@@ -4,11 +4,9 @@ use bevy::prelude::*;
 use bevy_renet::renet::{ClientId, RenetServer};
 
 use crate::{
-    network::{ServerLobby, ServerMessages},
+    network::{ServerChannel, ServerLobby, ServerMessages},
     player::Player,
-    ServerChannel,
 };
-
 
 #[derive(Debug, Default, Component)]
 pub struct Velocity(pub Vec3);

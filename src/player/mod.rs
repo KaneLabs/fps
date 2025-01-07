@@ -50,6 +50,7 @@ use bevy::{
 };
 use bevy_renet::renet::ClientId;
 use serde::{Deserialize, Serialize};
+use bevy_rapier3d::prelude::*;
 
 use crate::{
     network::{CurrentClientId, ServerLobby},
@@ -118,6 +119,12 @@ pub fn spawn_view_model(
             Player { id: client_id.0 },
             CameraSensitivity::default(),
             Transform::from_xyz(0.0, 1.0, 0.0),
+            RigidBody::Dynamic,
+            Collider::capsule(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.5),
+            Velocity::default(),
+            LockedAxes::ROTATION_LOCKED,
+            Friction::coefficient(0.0),
+            GravityScale(1.0),
         ))
         .with_children(|parent| {
             // Just one camera with fixed FOV

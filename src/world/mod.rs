@@ -1,3 +1,4 @@
+use bevy::log::info;
 use bevy::{color::palettes::tailwind, prelude::*, render::view::RenderLayers};
 use bevy_rapier3d::prelude::*;
 
@@ -102,3 +103,23 @@ pub fn spawn_lights(mut commands: Commands) {
 //             "Press arrow down to increase the FOV of the world model."
 //         )));
 // }
+
+pub fn setup_physics_and_debug(app: &mut App) {
+    app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
+        // Uncomment the next line to see collision boxes (helpful for debugging)
+        // .add_plugins(RapierDebugRenderPlugin::default())
+        .add_systems(Update, log_collisions);
+}
+
+pub fn log_collisions(mut collision_events: EventReader<CollisionEvent>) {
+    for collision_event in collision_events.read() {
+        match collision_event {
+            CollisionEvent::Started(entity1, entity2, _) => {
+                info!("Collision started between entities: {entity1:?} and {entity2:?}");
+            }
+            CollisionEvent::Stopped(entity1, entity2, _) => {
+                info!("Collision stopped between entities: {entity1:?} and {entity2:?}");
+            }
+        }
+    }
+}
