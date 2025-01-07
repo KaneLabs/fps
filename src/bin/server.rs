@@ -1,19 +1,17 @@
-use std::{collections::HashMap, f32::consts::PI};
-
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
-use bevy_egui::{EguiContexts, EguiPlugin};
+use bevy_egui::EguiPlugin;
 use bevy_renet::{
-    renet::{ClientId, RenetServer, ServerEvent},
+    renet::{RenetServer, ServerEvent},
     RenetServerPlugin,
 };
 use multiplayer::{
-    bot::{spawn_fireball, BotId, Projectile},
+    bot::{spawn_fireball, BotId, Projectile, Velocity},
     network::{ClientChannel, NetworkedEntities, ServerChannel, ServerLobby, ServerMessages},
     player::{Player, PlayerCommand, PlayerInput, PLAYER_MOVE_SPEED},
-    world::spawn_world_model, Velocity,
+    world::spawn_world_model,
 };
 use renet_visualizer::RenetServerVisualizer;
 

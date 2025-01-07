@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
 use network::{ClientChannel, ServerChannel};
 use serde::{Deserialize, Serialize};
+use bevy_rapier3d::prelude::*;
 
 pub mod bot;
 pub mod network;
@@ -18,9 +19,6 @@ pub const PROTOCOL_ID: u64 = 7;
 
 pub use bevy::prelude::{Mesh3d, MeshMaterial3d};
 
-
-#[derive(Debug, Default, Component)]
-pub struct Velocity(pub Vec3);
 
 
 // /// set up a simple 3D scene

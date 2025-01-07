@@ -203,8 +203,6 @@ pub fn player_input(
     player_input.right = keyboard_input.pressed(KeyCode::KeyD);
     player_input.up = keyboard_input.pressed(KeyCode::KeyW);
     player_input.down = keyboard_input.pressed(KeyCode::KeyS);
-
-    //
 }
 
 pub fn grab_mouse(

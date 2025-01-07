@@ -1,4 +1,5 @@
 use bevy::{color::palettes::tailwind, prelude::*, render::view::RenderLayers};
+use bevy_rapier3d::prelude::*;
 
 use crate::player::VIEW_MODEL_RENDER_LAYER;
 
@@ -17,12 +18,15 @@ pub fn spawn_world_model(
 ) {
     let floor = meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(10.0)));
     let cube = meshes.add(Cuboid::new(2.0, 0.5, 1.0));
+    let wall = meshes.add(Cuboid::new(0.5, 4.0, 10.0));
     let material = materials.add(Color::WHITE);
 
-    // The world model camera will render the floor and the cubes spawned in this system.
-    // Assigning no `RenderLayers` component defaults to layer 0.
-
-    commands.spawn((Mesh3d(floor), MeshMaterial3d(material.clone())));
+    commands.spawn((
+        Mesh3d(floor),
+        MeshMaterial3d(material.clone()),
+        Collider::cuboid(5.0, 0.1, 5.0),
+        RigidBody::Fixed,
+    ));
 
     commands.spawn((
         Mesh3d(cube.clone()),
@@ -32,8 +36,42 @@ pub fn spawn_world_model(
 
     commands.spawn((
         Mesh3d(cube),
-        MeshMaterial3d(material),
+        MeshMaterial3d(material.clone()),
         Transform::from_xyz(0.75, 1.75, 0.0),
+    ));
+
+    commands.spawn((
+        Mesh3d(wall.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(-5.0, 2.0, 0.0),
+        Collider::cuboid(0.25, 2.0, 5.0),
+        RigidBody::Fixed,
+    ));
+
+    commands.spawn((
+        Mesh3d(wall.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(5.0, 2.0, 0.0),
+        Collider::cuboid(0.25, 2.0, 5.0),
+        RigidBody::Fixed,
+    ));
+
+    commands.spawn((
+        Mesh3d(wall.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(0.0, 2.0, 5.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        Collider::cuboid(0.25, 2.0, 5.0),
+        RigidBody::Fixed,
+    ));
+
+    commands.spawn((
+        Mesh3d(wall),
+        MeshMaterial3d(material),
+        Transform::from_xyz(0.0, 2.0, -5.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        Collider::cuboid(0.25, 2.0, 5.0),
+        RigidBody::Fixed,
     ));
 }
 

@@ -1,22 +1,18 @@
-use std::collections::HashMap;
-
 use bevy::window::PrimaryWindow;
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::Vec3,
     prelude::*,
 };
-use bevy_egui::{EguiContexts, EguiPlugin};
-use bevy_renet::{
-    client_connected,
-    renet::{ClientId, RenetClient},
-    RenetClientPlugin,
-};
+use bevy_egui::EguiPlugin;
+use bevy_renet::{client_connected, renet::RenetClient, RenetClientPlugin};
 use multiplayer::network::{
     ClientChannel, ClientLobby, ControlledPlayer, CurrentClientId, NetworkMapping, PlayerInfo,
     ServerChannel,
 };
-use multiplayer::player::{change_fov, move_player, move_player_body, spawn_view_model, CursorState, grab_mouse};
+use multiplayer::player::{
+    change_fov, grab_mouse, move_player, move_player_body, spawn_view_model, CursorState,
+};
 use multiplayer::world::{spawn_lights, spawn_world_model};
 use multiplayer::{
     network::{connection_config, NetworkedEntities, ServerMessages},
@@ -136,13 +132,16 @@ fn main() {
 
     app.insert_resource(CursorState::default());
 
-    app.add_systems(Update, (
-        player_input,
-        move_player,
-        move_player_body,
-        grab_mouse,
-        change_fov,
-    ));
+    app.add_systems(
+        Update,
+        (
+            player_input,
+            move_player,
+            move_player_body,
+            grab_mouse,
+            change_fov,
+        ),
+    );
 
     // app.add_systems(Update, (player_input, camera_follow, update_target_system));
     // app.add_systems(
@@ -177,10 +176,10 @@ fn player_input(
         keyboard_input.pressed(KeyCode::KeyS) || keyboard_input.pressed(KeyCode::ArrowDown);
 
     // if mouse_button_input.just_pressed(MouseButton::Left) {
-        // let target_transform = target_query.single();
-        // player_commands.send(PlayerCommand::BasicAttack {
-        //     cast_at: target_transform.translation,
-        // });
+    // let target_transform = target_query.single();
+    // player_commands.send(PlayerCommand::BasicAttack {
+    //     cast_at: target_transform.translation,
+    // });
     // }
 }
 

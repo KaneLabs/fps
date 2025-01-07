@@ -6,8 +6,12 @@ use bevy_renet::renet::{ClientId, RenetServer};
 use crate::{
     network::{ServerLobby, ServerMessages},
     player::Player,
-    ServerChannel, Velocity,
+    ServerChannel,
 };
+
+
+#[derive(Debug, Default, Component)]
+pub struct Velocity(pub Vec3);
 
 #[derive(Debug, Component)]
 pub struct Bot {
