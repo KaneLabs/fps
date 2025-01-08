@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use bevy::{
-    prelude::{Component, Entity, Resource},
-    utils::HashMap,
+    math::{Quat, Vec3}, prelude::{Component, Entity, Resource}, utils::HashMap
 };
 use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
 use serde::{Deserialize, Serialize};
+
+use crate::player::PlayerInput;
 
 #[derive(Debug, Default, Resource)]
 pub struct ServerLobby {
@@ -29,7 +30,7 @@ pub struct ClientLobby {
     pub players: HashMap<ClientId, PlayerInfo>,
 }
 
-#[derive(Debug, Resource)]
+#[derive(Resource, Debug)]
 pub struct CurrentClientId(pub u64);
 
 pub enum ClientChannel {
@@ -64,6 +65,14 @@ pub enum ServerMessages {
 pub struct NetworkedEntities {
     pub entities: Vec<Entity>,
     pub translations: Vec<[f32; 3]>,
+    pub rotations: Vec<[f32; 4]>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ClientInput {
+    Movement(PlayerInput),
+    Rotation(Quat),
+    Position(Vec3),
 }
 
 impl From<ClientChannel> for u8 {

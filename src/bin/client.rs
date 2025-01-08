@@ -1,3 +1,4 @@
+use bevy::render::view::RenderLayers;
 use bevy::window::PrimaryWindow;
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
@@ -5,15 +6,20 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::EguiPlugin;
+use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
+use bevy_rapier3d::prelude::{Collider, Friction, GravityScale, LockedAxes, RigidBody, Sensor};
+use bevy_renet::renet::ClientId;
 use bevy_renet::{client_connected, renet::RenetClient, RenetClientPlugin};
+use multiplayer::bot::Velocity;
 use multiplayer::network::{
     ClientChannel, ClientLobby, ControlledPlayer, CurrentClientId, NetworkMapping, PlayerInfo,
     ServerChannel,
 };
 use multiplayer::player::{
-    change_fov, grab_mouse, move_player, move_player_body, spawn_view_model, CursorState,
+    change_fov, grab_mouse, move_player, move_player_body, player_input, spawn_view_model,
+    CameraSensitivity, CursorState, Player,
 };
-use multiplayer::world::{spawn_lights, spawn_world_model};
+use multiplayer::world::{spawn_lights, spawn_world_model, DEFAULT_RENDER_LAYER};
 use multiplayer::{
     network::{connection_config, NetworkedEntities, ServerMessages},
     player::{PlayerCommand, PlayerInput},
@@ -41,7 +47,7 @@ fn add_netcode_network(app: &mut App) {
     let current_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    let client_id = current_time.as_millis() as u64;
+    let client_id = current_time.as_millis() as ClientId;
     let authentication = ClientAuthentication::Unsecure {
         client_id,
         protocol_id: PROTOCOL_ID,
@@ -85,7 +91,9 @@ fn add_steam_network(app: &mut App) {
     app.add_plugins(SteamClientPlugin);
     app.insert_resource(client);
     app.insert_resource(transport);
-    app.insert_resource(CurrentClientId(steam_client.user().steam_id().raw()));
+    app.insert_resource(CurrentClientId(
+        steam_client.user().steam_id().raw() as ClientId
+    ));
 
     app.configure_sets(Update, Connected.run_if(client_connected));
 
@@ -128,9 +136,13 @@ fn main() {
     app.insert_resource(NetworkMapping::default());
     app.insert_resource(CurrentClientId(0));
 
+    app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
+
     app.add_systems(Startup, (spawn_view_model, spawn_world_model, spawn_lights));
 
     app.insert_resource(CursorState::default());
+
+    app.configure_sets(Update, Connected.run_if(client_connected));
 
     app.add_systems(
         Update,
@@ -143,49 +155,25 @@ fn main() {
         ),
     );
 
-    // app.add_systems(Update, (player_input, camera_follow, update_target_system));
-    // app.add_systems(
-    //     Update,
-    //     (
-    //         client_send_input,
-    //         // client_send_player_commands,
-    //         // client_sync_players,
-    //     )
-    //         .in_set(Connected),
-    // );
-
-    // app.add_systems(Startup, (setup_level, setup_camera, setup_target));
+    app.add_systems(
+        Update,
+        (client_sync_players).in_set(Connected),
+    );
 
     app.run();
 }
 
-fn player_input(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut player_input: ResMut<PlayerInput>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    target_query: Query<&Transform, With<Target>>,
-    mut player_commands: EventWriter<PlayerCommand>,
-) {
-    player_input.left =
-        keyboard_input.pressed(KeyCode::KeyA) || keyboard_input.pressed(KeyCode::ArrowLeft);
-    player_input.right =
-        keyboard_input.pressed(KeyCode::KeyD) || keyboard_input.pressed(KeyCode::ArrowRight);
-    player_input.up =
-        keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp);
-    player_input.down =
-        keyboard_input.pressed(KeyCode::KeyS) || keyboard_input.pressed(KeyCode::ArrowDown);
-
-    // if mouse_button_input.just_pressed(MouseButton::Left) {
-    // let target_transform = target_query.single();
-    // player_commands.send(PlayerCommand::BasicAttack {
-    //     cast_at: target_transform.translation,
-    // });
-    // }
-}
-
 fn client_send_input(player_input: Res<PlayerInput>, mut client: ResMut<RenetClient>) {
-    let input_message = bincode::serialize(&*player_input).unwrap();
+    if !client.is_connected() {
+        return;
+    }
 
+    info!(
+        "Sending input: up={}, down={}, left={}, right={}",
+        player_input.up, player_input.down, player_input.left, player_input.right
+    );
+
+    let input_message = bincode::serialize(&*player_input).unwrap();
     client.send_message(ClientChannel::Input, input_message);
 }
 
@@ -207,7 +195,13 @@ fn client_sync_players(
     client_id: Res<CurrentClientId>,
     mut lobby: ResMut<ClientLobby>,
     mut network_mapping: ResMut<NetworkMapping>,
+    controlled_players: Query<Entity, With<ControlledPlayer>>,
+    transforms: Query<&Transform>,
 ) {
+    if !client.is_connected() {
+        return;
+    }
+
     let client_id = client_id.0;
     while let Some(message) = client.receive_message(ServerChannel::ServerMessages) {
         let server_message = bincode::deserialize(&message).unwrap();
@@ -217,23 +211,87 @@ fn client_sync_players(
                 translation,
                 entity,
             } => {
+                info!(
+                    "Client: Received player create - ID: {}, Entity: {:?}, Is Local: {}, Current Client ID: {}",
+                    id,
+                    entity,
+                    id == client_id,
+                    client_id
+                );
                 println!("Player {} connected.", id);
-                let mut client_entity = commands.spawn((
-                    Mesh3d(meshes.add(Mesh::from(Capsule3d::default()))),
-                    MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
-                    Transform::from_xyz(translation[0], translation[1], translation[2]),
-                ));
 
+                // If this is our player, we spawn the FPS view model
                 if client_id == id {
-                    client_entity.insert(ControlledPlayer);
+                    commands
+                        .spawn((
+                            Player { id },
+                            CameraSensitivity::default(),
+                            Transform::from_translation(Vec3::from(translation)),
+                            RigidBody::Dynamic,
+                            Collider::capsule(
+                                Vec3::new(0.0, 0.5, 0.0),
+                                Vec3::new(0.0, 1.5, 0.0),
+                                0.5,
+                            ),
+                            Velocity::default(),
+                            LockedAxes::ROTATION_LOCKED_X | LockedAxes::ROTATION_LOCKED_Z,
+                            Friction::coefficient(1.0),
+                            GravityScale(1.0),
+                            ControlledPlayer,
+                            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                        ))
+                        .with_children(|parent| {
+                            parent.spawn((
+                                Camera3dBundle {
+                                    projection: Projection::Perspective(PerspectiveProjection {
+                                        fov: 90.0_f32.to_radians(),
+                                        ..default()
+                                    }),
+                                    ..default()
+                                },
+                                RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                            ));
+                        });
+                } else {
+                    // For other players, spawn with matching collider but as sensor
+                    let client_entity = commands
+                        .spawn((
+                            Mesh3d(meshes.add(Mesh::from(Capsule3d::default()))),
+                            MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
+                            Transform::from_translation(Vec3::from(translation)),
+                            Collider::capsule(
+                                Vec3::new(0.0, 0.5, 0.0),
+                                Vec3::new(0.0, 1.5, 0.0),
+                                0.5,
+                            ),
+                            Sensor,
+                            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                        ))
+                        .id();
+
+                    info!(
+                        "Client Mappings - ID: {}, Server Entity: {:?}, Client Entity: {:?}, Network Map Size: {}",
+                        id,
+                        entity,
+                        client_entity,
+                        network_mapping.0.len()
+                    );
+
+                    let player_info = PlayerInfo {
+                        server_entity: entity,
+                        client_entity,
+                    };
+                    lobby.players.insert(id, player_info);
+                    network_mapping.0.insert(entity, client_entity);
                 }
 
-                let player_info = PlayerInfo {
-                    server_entity: entity,
-                    client_entity: client_entity.id(),
-                };
-                lobby.players.insert(id, player_info);
-                network_mapping.0.insert(entity, client_entity.id());
+                info!(
+                    "Player spawn - ID: {}, Is Local: {}, Position: {:?}, Layer: {}",
+                    id,
+                    client_id == id,
+                    translation,
+                    if client_id == id { "Local" } else { "Remote" }
+                );
             }
             ServerMessages::PlayerRemove { id } => {
                 println!("Player {} disconnected.", id);
@@ -268,77 +326,37 @@ fn client_sync_players(
     while let Some(message) = client.receive_message(ServerChannel::NetworkedEntities) {
         let networked_entities: NetworkedEntities = bincode::deserialize(&message).unwrap();
 
+        // Only log if positions actually changed
+        let mut position_changed = false;
+
         for i in 0..networked_entities.entities.len() {
             if let Some(entity) = network_mapping.0.get(&networked_entities.entities[i]) {
-                let translation = networked_entities.translations[i].into();
-                let transform = Transform {
-                    translation,
-                    ..Default::default()
-                };
-                commands.entity(*entity).insert(transform);
+                if let Some(mut cmd_entity) = commands.get_entity(*entity) {
+                    if controlled_players.contains(*entity) {
+                        continue;
+                    }
+
+                    let translation = networked_entities.translations[i].into();
+                    let rotation = Quat::from_array(networked_entities.rotations[i]);
+
+                    if let Ok(current_transform) = transforms.get(*entity) {
+                        let distance = current_transform.translation.distance(translation);
+                        if distance > 0.001 {
+                            position_changed = true;
+                            info!(
+                                "Entity {:?} moved from {:?} to {:?}",
+                                entity, current_transform.translation, translation
+                            );
+                        }
+                    }
+
+                    cmd_entity.insert(Transform {
+                        translation,
+                        rotation,
+                        ..Default::default()
+                    });
+                }
             }
-        }
-    }
-}
-
-#[derive(Component)]
-struct Target;
-
-fn update_target_system(
-    primary_window: Query<&Window, With<PrimaryWindow>>,
-    mut target_query: Query<&mut Transform, With<Target>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-) {
-    let (camera, camera_transform) = camera_query.single();
-    let mut target_transform = target_query.single_mut();
-    if let Some(cursor_pos) = primary_window.single().cursor_position() {
-        if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) {
-            if let Some(distance) = ray.intersect_plane(Vec3::Y, InfinitePlane3d::new(Vec3::Y)) {
-                target_transform.translation = ray.direction * distance + ray.origin;
-            }
-        }
-    }
-}
-
-fn setup_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0., 8.0, 2.5).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
-    ));
-}
-
-fn setup_target(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands
-        .spawn((
-            Mesh3d(meshes.add(Mesh::from(Sphere::new(0.1)))),
-            MeshMaterial3d(materials.add(Color::srgb(1.0, 0.0, 0.0))),
-            Transform::from_xyz(0.0, 0., 0.0),
-        ))
-        .insert(Target);
-}
-
-fn camera_follow(
-    time: Res<Time>,
-    mut camera_query: Query<&mut Transform, (With<Camera>, Without<ControlledPlayer>)>,
-    player_query: Query<&Transform, With<ControlledPlayer>>,
-) {
-    let mut cam_transform = camera_query.single_mut();
-    if let Ok(player_transform) = player_query.get_single() {
-        let eye = Vec3::new(
-            player_transform.translation.x,
-            8.,
-            player_transform.translation.z + 2.5,
-        );
-        if eye.distance(cam_transform.translation) > 10.0 {
-            cam_transform.translation = eye;
-        } else {
-            cam_transform
-                .translation
-                .smooth_nudge(&eye, 8.0, time.delta_secs());
         }
     }
 }

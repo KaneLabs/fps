@@ -48,12 +48,12 @@ use bevy::{
     color::palettes::tailwind, input::mouse::AccumulatedMouseMotion, pbr::NotShadowCaster,
     prelude::*, render::view::RenderLayers,
 };
-use bevy_renet::renet::ClientId;
-use serde::{Deserialize, Serialize};
 use bevy_rapier3d::prelude::*;
+use bevy_renet::renet::{ClientId, RenetClient};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    network::{CurrentClientId, ServerLobby},
+    network::{ClientChannel, ClientInput, CurrentClientId, ServerLobby},
     world::WorldModelCamera,
 };
 
@@ -141,6 +141,9 @@ pub fn spawn_view_model(
 pub fn move_player(
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
     player: Single<(&mut Transform, &CameraSensitivity), With<Player>>,
+    mut client: ResMut<RenetClient>,
+    time: Res<Time>,
+    mut last_sent: Local<f32>,
 ) {
     let (mut transform, camera_sensitivity) = player.into_inner();
     let delta = accumulated_mouse_motion.delta;
@@ -157,28 +160,42 @@ pub fn move_player(
         pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
         transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+
+        // Send rotation updates at most 20 times per second
+        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
+            let input = ClientInput::Rotation(transform.rotation);
+            let message = bincode::serialize(&input).unwrap();
+            client.send_message(ClientChannel::Input, message);
+            *last_sent = time.elapsed_secs();
+        }
     }
 }
 
 pub fn move_player_body(
-    mut player: Single<&mut Transform, With<Player>>,
+    player: Single<&mut Transform, With<Player>>,
     player_input: Res<PlayerInput>,
     time: Res<Time>,
+    mut client: ResMut<RenetClient>,
+    mut last_sent: Local<f32>,
 ) {
     let mut transform = player.into_inner();
     let x = (player_input.right as i8 - player_input.left as i8) as f32;
     let z = (player_input.down as i8 - player_input.up as i8) as f32;
-    
+
     if x != 0.0 || z != 0.0 {
-        // Get forward and right vectors from the camera's rotation
         let forward = transform.forward();
         let right = transform.right();
         
-        // Calculate movement direction relative to camera
         let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
-        
-        // Only move in the horizontal plane (prevent flying/sinking)
         transform.translation += Vec3::new(movement.x, 0.0, movement.z);
+
+        // Send position updates at 20Hz
+        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
+            let input = ClientInput::Position(transform.translation);
+            let message = bincode::serialize(&input).unwrap();
+            client.send_message(ClientChannel::Input, message);
+            *last_sent = time.elapsed_secs();
+        }
     }
 }
 
@@ -205,11 +222,20 @@ pub fn change_fov(
 pub fn player_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut player_input: ResMut<PlayerInput>,
+    mut client: ResMut<RenetClient>,
 ) {
+    // Update input state
     player_input.left = keyboard_input.pressed(KeyCode::KeyA);
     player_input.right = keyboard_input.pressed(KeyCode::KeyD);
     player_input.up = keyboard_input.pressed(KeyCode::KeyW);
     player_input.down = keyboard_input.pressed(KeyCode::KeyS);
+
+    // Send if client is connected
+    if client.is_connected() {
+        let input = ClientInput::Movement(*player_input);
+        let message = bincode::serialize(&input).unwrap();
+        client.send_message(ClientChannel::Input, message);
+    }
 }
 
 pub fn grab_mouse(
@@ -224,11 +250,11 @@ pub fn grab_mouse(
         // Force cursor to center
         window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
         window.cursor_options.visible = false;
-        
+
         // Get window center
         let half_width = window.resolution.width() / 2.0;
         let half_height = window.resolution.height() / 2.0;
-        
+
         // Set cursor position to center
         window.set_cursor_position(Some(Vec2::new(half_width, half_height)));
     }

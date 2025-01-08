@@ -570,6 +570,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_flycam"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83039a8e4f7e92c96c97b0b3ac738a54781f77ce5086d3ae39698219586a7f1d"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_gizmos"
 version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2745,6 +2754,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "bevy_flycam",
  "bevy_rapier3d",
  "bevy_renet",
  "bincode",

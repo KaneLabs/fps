@@ -3,6 +3,7 @@ use bevy::{color::palettes::tailwind, prelude::*, render::view::RenderLayers};
 use bevy_rapier3d::prelude::*;
 
 use crate::player::VIEW_MODEL_RENDER_LAYER;
+use crate::entities::WorldObjectBundle;
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -25,9 +26,12 @@ pub fn spawn_world_model(
     commands.spawn((
         Mesh3d(floor),
         MeshMaterial3d(material.clone()),
-        Collider::cuboid(5.0, 0.1, 5.0),
-        RigidBody::Fixed,
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        WorldObjectBundle::floor(),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
+
+    info!("Spawned floor with collider at y=0");
 
     commands.spawn((
         Mesh3d(cube.clone()),
@@ -45,16 +49,16 @@ pub fn spawn_world_model(
         Mesh3d(wall.clone()),
         MeshMaterial3d(material.clone()),
         Transform::from_xyz(-5.0, 2.0, 0.0),
-        Collider::cuboid(0.25, 2.0, 5.0),
-        RigidBody::Fixed,
+        WorldObjectBundle::wall(),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 
     commands.spawn((
         Mesh3d(wall.clone()),
         MeshMaterial3d(material.clone()),
         Transform::from_xyz(5.0, 2.0, 0.0),
-        Collider::cuboid(0.25, 2.0, 5.0),
-        RigidBody::Fixed,
+        WorldObjectBundle::wall(),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 
     commands.spawn((
@@ -62,8 +66,8 @@ pub fn spawn_world_model(
         MeshMaterial3d(material.clone()),
         Transform::from_xyz(0.0, 2.0, 5.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        Collider::cuboid(0.25, 2.0, 5.0),
-        RigidBody::Fixed,
+        WorldObjectBundle::wall(),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 
     commands.spawn((
@@ -71,22 +75,28 @@ pub fn spawn_world_model(
         MeshMaterial3d(material),
         Transform::from_xyz(0.0, 2.0, -5.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        Collider::cuboid(0.25, 2.0, 5.0),
-        RigidBody::Fixed,
+        WorldObjectBundle::wall(),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 }
 
 pub fn spawn_lights(mut commands: Commands) {
-    commands.spawn((
-        PointLight {
-            color: Color::from(tailwind::ROSE_300),
+    // Ambient light
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 0.5,
+    });
+
+    // Directional light
+    commands.spawn(DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            illuminance: 10000.0,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(-2.0, 4.0, -0.75),
-        // The light source illuminates both the world model and the view model.
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER, VIEW_MODEL_RENDER_LAYER]),
-    ));
+        transform: Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
 }
 
 // pub fn spawn_text(mut commands: Commands) {
@@ -115,10 +125,16 @@ pub fn log_collisions(mut collision_events: EventReader<CollisionEvent>) {
     for collision_event in collision_events.read() {
         match collision_event {
             CollisionEvent::Started(entity1, entity2, _) => {
-                info!("Collision started between entities: {entity1:?} and {entity2:?}");
+                info!(
+                    "Collision started between entities: {:?} and {:?}",
+                    entity1, entity2
+                );
             }
             CollisionEvent::Stopped(entity1, entity2, _) => {
-                info!("Collision stopped between entities: {entity1:?} and {entity2:?}");
+                info!(
+                    "Collision stopped between entities: {:?} and {:?}",
+                    entity1, entity2
+                );
             }
         }
     }

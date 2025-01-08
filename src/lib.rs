@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod entities;
 pub mod network;
 pub mod player;
 pub mod world;
