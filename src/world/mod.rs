@@ -2,8 +2,8 @@ use bevy::log::info;
 use bevy::{color::palettes::tailwind, prelude::*, render::view::RenderLayers};
 use bevy_rapier3d::prelude::*;
 
-use crate::player::VIEW_MODEL_RENDER_LAYER;
 use crate::entities::WorldObjectBundle;
+use crate::player::VIEW_MODEL_RENDER_LAYER;
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -87,16 +87,20 @@ pub fn spawn_lights(mut commands: Commands) {
         brightness: 0.5,
     });
 
-    // Directional light
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
+    // Main directional light
+    commands.spawn((
+        DirectionalLightBundle {
+            directional_light: DirectionalLight {
+                illuminance: 10000.0,
+                shadows_enabled: true,
+                ..default()
+            },
+            transform: Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+        // Light affects both world and view model
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER, VIEW_MODEL_RENDER_LAYER]),
+    ));
 }
 
 // pub fn spawn_text(mut commands: Commands) {

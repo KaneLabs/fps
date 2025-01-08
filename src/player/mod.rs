@@ -53,7 +53,7 @@ use bevy_renet::renet::{ClientId, RenetClient};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    network::{ClientChannel, ClientInput, CurrentClientId, ServerLobby},
+    network::{ClientChannel, ClientInput, ControlledPlayer, CurrentClientId, ServerLobby},
     world::WorldModelCamera,
 };
 
@@ -140,61 +140,69 @@ pub fn spawn_view_model(
 
 pub fn move_player(
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    player: Single<(&mut Transform, &CameraSensitivity), With<Player>>,
+    mut query: Query<(&mut Transform, &CameraSensitivity), With<ControlledPlayer>>,
     mut client: ResMut<RenetClient>,
     time: Res<Time>,
     mut last_sent: Local<f32>,
 ) {
-    let (mut transform, camera_sensitivity) = player.into_inner();
-    let delta = accumulated_mouse_motion.delta;
+    if let Ok((mut transform, camera_sensitivity)) = query.get_single_mut() {
+        let delta = accumulated_mouse_motion.delta;
 
-    if delta != Vec2::ZERO {
-        let delta_yaw = -delta.x * camera_sensitivity.x;
-        let delta_pitch = -delta.y * camera_sensitivity.y;
+        if delta != Vec2::ZERO {
+            let delta_yaw = -delta.x * camera_sensitivity.x;
+            let delta_pitch = -delta.y * camera_sensitivity.y;
 
-        let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
-        yaw += delta_yaw;
-        
-        // Prevent looking too far up/down
-        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-        pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
+            yaw += delta_yaw;
 
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+            // Prevent looking too far up/down
+            const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+            pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
-        // Send rotation updates at most 20 times per second
-        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
-            let input = ClientInput::Rotation(transform.rotation);
-            let message = bincode::serialize(&input).unwrap();
-            client.send_message(ClientChannel::Input, message);
-            *last_sent = time.elapsed_secs();
+            transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+
+            // Send rotation updates at most 20 times per second
+            if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
+                let input = ClientInput::Rotation(transform.rotation);
+                let message = bincode::serialize(&input).unwrap();
+                client.send_message(ClientChannel::Input, message);
+                *last_sent = time.elapsed_secs();
+            }
         }
     }
 }
 
 pub fn move_player_body(
-    player: Single<&mut Transform, With<Player>>,
+    mut query: Query<&mut Transform, With<ControlledPlayer>>,
     player_input: Res<PlayerInput>,
     time: Res<Time>,
     mut client: ResMut<RenetClient>,
     mut last_sent: Local<f32>,
 ) {
-    let mut transform = player.into_inner();
-    let x = (player_input.right as i8 - player_input.left as i8) as f32;
-    let z = (player_input.down as i8 - player_input.up as i8) as f32;
+    if let Ok(mut transform) = query.get_single_mut() {
+        let x = (player_input.right as i8 - player_input.left as i8) as f32;
+        let z = (player_input.down as i8 - player_input.up as i8) as f32;
 
-    if x != 0.0 || z != 0.0 {
-        let forward = transform.forward();
-        let right = transform.right();
-        
-        let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
-        transform.translation += Vec3::new(movement.x, 0.0, movement.z);
+        if x != 0.0 || z != 0.0 {
+            let forward = transform.forward();
+            let right = transform.right();
 
-        // Send position updates at 20Hz
-        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
-            let input = ClientInput::Position(transform.translation);
-            let message = bincode::serialize(&input).unwrap();
-            client.send_message(ClientChannel::Input, message);
-            *last_sent = time.elapsed_secs();
+            // Project movement onto horizontal plane
+            let forward = Vec3::new(forward.x, 0.0, forward.z).normalize();
+            let right = Vec3::new(right.x, 0.0, right.z).normalize();
+
+            let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
+            
+            // Only apply horizontal movement
+            transform.translation += Vec3::new(movement.x, 0.0, movement.z);
+
+            // Send position updates at 20Hz
+            if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
+                let input = ClientInput::Position(transform.translation);
+                let message = bincode::serialize(&input).unwrap();
+                client.send_message(ClientChannel::Input, message);
+                *last_sent = time.elapsed_secs();
+            }
         }
     }
 }

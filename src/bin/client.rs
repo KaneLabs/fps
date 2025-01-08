@@ -1,3 +1,5 @@
+use bevy::color::palettes::tailwind;
+use bevy::pbr::NotShadowCaster;
 use bevy::render::view::RenderLayers;
 use bevy::window::PrimaryWindow;
 use bevy::{
@@ -7,7 +9,10 @@ use bevy::{
 };
 use bevy_egui::EguiPlugin;
 use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
-use bevy_rapier3d::prelude::{Collider, Friction, GravityScale, LockedAxes, RigidBody, Sensor};
+use bevy_rapier3d::prelude::{
+    Ccd, CoefficientCombineRule, Collider, Damping, Friction, GravityScale, LockedAxes,
+    Restitution, RigidBody, Sensor,
+};
 use bevy_renet::renet::ClientId;
 use bevy_renet::{client_connected, renet::RenetClient, RenetClientPlugin};
 use multiplayer::bot::Velocity;
@@ -17,9 +22,9 @@ use multiplayer::network::{
 };
 use multiplayer::player::{
     change_fov, grab_mouse, move_player, move_player_body, player_input, spawn_view_model,
-    CameraSensitivity, CursorState, Player,
+    CameraSensitivity, CursorState, Player, VIEW_MODEL_RENDER_LAYER,
 };
-use multiplayer::world::{spawn_lights, spawn_world_model, DEFAULT_RENDER_LAYER};
+use multiplayer::world::{spawn_lights, spawn_world_model, WorldModelCamera, DEFAULT_RENDER_LAYER};
 use multiplayer::{
     network::{connection_config, NetworkedEntities, ServerMessages},
     player::{PlayerCommand, PlayerInput},
@@ -134,11 +139,10 @@ fn main() {
     app.insert_resource(ClientLobby::default());
     app.insert_resource(PlayerInput::default());
     app.insert_resource(NetworkMapping::default());
-    app.insert_resource(CurrentClientId(0));
 
     app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
 
-    app.add_systems(Startup, (spawn_view_model, spawn_world_model, spawn_lights));
+    app.add_systems(Startup, (spawn_world_model, spawn_lights));
 
     app.insert_resource(CursorState::default());
 
@@ -155,36 +159,9 @@ fn main() {
         ),
     );
 
-    app.add_systems(
-        Update,
-        (client_sync_players).in_set(Connected),
-    );
+    app.add_systems(Update, (client_sync_players).in_set(Connected));
 
     app.run();
-}
-
-fn client_send_input(player_input: Res<PlayerInput>, mut client: ResMut<RenetClient>) {
-    if !client.is_connected() {
-        return;
-    }
-
-    info!(
-        "Sending input: up={}, down={}, left={}, right={}",
-        player_input.up, player_input.down, player_input.left, player_input.right
-    );
-
-    let input_message = bincode::serialize(&*player_input).unwrap();
-    client.send_message(ClientChannel::Input, input_message);
-}
-
-fn client_send_player_commands(
-    mut player_commands: EventReader<PlayerCommand>,
-    mut client: ResMut<RenetClient>,
-) {
-    for command in player_commands.read() {
-        let command_message = bincode::serialize(command).unwrap();
-        client.send_message(ClientChannel::Command, command_message);
-    }
 }
 
 fn client_sync_players(
@@ -196,7 +173,6 @@ fn client_sync_players(
     mut lobby: ResMut<ClientLobby>,
     mut network_mapping: ResMut<NetworkMapping>,
     controlled_players: Query<Entity, With<ControlledPlayer>>,
-    transforms: Query<&Transform>,
 ) {
     if !client.is_connected() {
         return;
@@ -222,6 +198,9 @@ fn client_sync_players(
 
                 // If this is our player, we spawn the FPS view model
                 if client_id == id {
+                    let arm = meshes.add(Cuboid::new(0.1, 0.1, 0.5));
+                    let arm_material = materials.add(Color::from(tailwind::TEAL_200));
+
                     commands
                         .spawn((
                             Player { id },
@@ -234,22 +213,59 @@ fn client_sync_players(
                                 0.5,
                             ),
                             Velocity::default(),
-                            LockedAxes::ROTATION_LOCKED_X | LockedAxes::ROTATION_LOCKED_Z,
-                            Friction::coefficient(1.0),
-                            GravityScale(1.0),
+                            LockedAxes::ROTATION_LOCKED_X
+                                | LockedAxes::ROTATION_LOCKED_Z
+                                | LockedAxes::ROTATION_LOCKED_Y,
+                            Friction {
+                                coefficient: 0.5,
+                                combine_rule: CoefficientCombineRule::Min,
+                            },
+                            Restitution {
+                                coefficient: 0.0,
+                                combine_rule: CoefficientCombineRule::Min,
+                            },
+                            Damping {
+                                linear_damping: 0.5,
+                                angular_damping: 1.0,
+                            },
                             ControlledPlayer,
-                            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                            Visibility::Visible,
+                            RenderLayers::layer(DEFAULT_RENDER_LAYER),
                         ))
                         .with_children(|parent| {
+                            // World model camera (sees layer 0)
                             parent.spawn((
-                                Camera3dBundle {
-                                    projection: Projection::Perspective(PerspectiveProjection {
-                                        fov: 90.0_f32.to_radians(),
-                                        ..default()
-                                    }),
+                                WorldModelCamera,
+                                Camera3d::default(),
+                                Projection::from(PerspectiveProjection {
+                                    fov: 90.0_f32.to_radians(),
+                                    ..default()
+                                }),
+                            ));
+
+                            // Spawn view model camera.
+                            parent.spawn((
+                                Camera3d::default(),
+                                Camera {
+                                    // Bump the order to render on top of the world model.
+                                    order: 1,
                                     ..default()
                                 },
-                                RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                                Projection::from(PerspectiveProjection {
+                                    fov: 70.0_f32.to_radians(),
+                                    ..default()
+                                }),
+                                // Only render objects belonging to the view model.
+                                RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+                            ));
+
+                            // Player's arm
+                            parent.spawn((
+                                Mesh3d(arm),
+                                MeshMaterial3d(arm_material),
+                                Transform::from_xyz(0.2, -0.1, -0.25),
+                                RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+                                NotShadowCaster,
                             ));
                         });
                 } else {
@@ -326,29 +342,18 @@ fn client_sync_players(
     while let Some(message) = client.receive_message(ServerChannel::NetworkedEntities) {
         let networked_entities: NetworkedEntities = bincode::deserialize(&message).unwrap();
 
-        // Only log if positions actually changed
-        let mut position_changed = false;
-
         for i in 0..networked_entities.entities.len() {
             if let Some(entity) = network_mapping.0.get(&networked_entities.entities[i]) {
-                if let Some(mut cmd_entity) = commands.get_entity(*entity) {
-                    if controlled_players.contains(*entity) {
+                // Skip updates for our controlled player
+                if let Some(player_info) = lobby.players.get(&client_id) {
+                    if player_info.client_entity == *entity {
                         continue;
                     }
+                }
 
+                if let Some(mut cmd_entity) = commands.get_entity(*entity) {
                     let translation = networked_entities.translations[i].into();
                     let rotation = Quat::from_array(networked_entities.rotations[i]);
-
-                    if let Ok(current_transform) = transforms.get(*entity) {
-                        let distance = current_transform.translation.distance(translation);
-                        if distance > 0.001 {
-                            position_changed = true;
-                            info!(
-                                "Entity {:?} moved from {:?} to {:?}",
-                                entity, current_transform.translation, translation
-                            );
-                        }
-                    }
 
                     cmd_entity.insert(Transform {
                         translation,

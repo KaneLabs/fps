@@ -43,7 +43,10 @@ impl WorldObjectBundle {
         Self {
             rigid_body: RigidBody::Fixed,
             collider: Collider::cuboid(10.0, 1.0, 10.0),
-            friction: Friction::coefficient(1.0),
+            friction: Friction {
+                coefficient: 0.0,
+                combine_rule: CoefficientCombineRule::Min,
+            },
         }
     }
 
@@ -51,7 +54,10 @@ impl WorldObjectBundle {
         Self {
             rigid_body: RigidBody::Fixed,
             collider: Collider::cuboid(0.25, 2.0, 5.0),
-            friction: Friction::coefficient(1.0),
+            friction: Friction {
+                coefficient: 0.0,
+                combine_rule: CoefficientCombineRule::Min,
+            },
         }
     }
 }
