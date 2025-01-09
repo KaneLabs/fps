@@ -71,8 +71,9 @@ pub struct NetworkedEntities {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientInput {
     Movement(PlayerInput),
-    Rotation(Quat),
     Position(Vec3),
+    Rotation(Quat),
+    Interact,
 }
 
 impl From<ClientChannel> for u8 {

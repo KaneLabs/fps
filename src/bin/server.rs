@@ -307,6 +307,10 @@ fn server_update_system(
                             });
                         }
                     }
+                    ClientInput::Interact => {
+                        info!("Player {} tried to interact", client_id);
+                        // Handle interaction (we can add specific interaction logic later)
+                    }
                 }
             }
         }
@@ -353,19 +357,27 @@ fn server_network_sync(
 }
 
 fn move_players_system(
-    mut query: Query<(&mut Transform, &PlayerInput, &mut Velocity, &mut bevy_rapier3d::prelude::Velocity), With<Player>>,
+    mut query: Query<
+        (
+            &mut Transform,
+            &PlayerInput,
+            &mut Velocity,
+            &mut bevy_rapier3d::prelude::Velocity,
+        ),
+        With<Player>,
+    >,
     time: Res<Time>,
 ) {
     for (mut transform, input, mut game_vel, mut physics_vel) in query.iter_mut() {
         let x = (input.right as i8 - input.left as i8) as f32;
         let z = (input.down as i8 - input.up as i8) as f32;
-        
+
         if x != 0.0 || z != 0.0 {
             let forward = transform.forward();
             let right = transform.right();
-            
+
             let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED;
-            
+
             // Update velocities
             game_vel.0.x = movement.x;
             game_vel.0.z = movement.z;

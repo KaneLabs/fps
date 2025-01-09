@@ -68,6 +68,7 @@ pub struct PlayerInput {
     pub down: bool,
     pub left: bool,
     pub right: bool,
+    pub interact: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Event)]
@@ -140,12 +141,12 @@ pub fn spawn_view_model(
 
 pub fn move_player(
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    mut query: Query<(&mut Transform, &CameraSensitivity), With<ControlledPlayer>>,
+    mut query: Query<(&mut KinematicCharacterController, &mut Transform, &CameraSensitivity), With<ControlledPlayer>>,
     mut client: ResMut<RenetClient>,
     time: Res<Time>,
     mut last_sent: Local<f32>,
 ) {
-    if let Ok((mut transform, camera_sensitivity)) = query.get_single_mut() {
+    if let Ok((mut controller, mut transform, camera_sensitivity)) = query.get_single_mut() {
         let delta = accumulated_mouse_motion.delta;
 
         if delta != Vec2::ZERO {
@@ -160,6 +161,9 @@ pub fn move_player(
             pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
             transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+            
+            // Update character controller's up direction based on rotation
+            controller.up = transform.up().into();
 
             // Send rotation updates at most 20 times per second
             if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
@@ -173,28 +177,22 @@ pub fn move_player(
 }
 
 pub fn move_player_body(
-    mut query: Query<&mut Transform, With<ControlledPlayer>>,
+    mut query: Query<(&mut KinematicCharacterController, &Transform), With<ControlledPlayer>>,
     player_input: Res<PlayerInput>,
     time: Res<Time>,
     mut client: ResMut<RenetClient>,
     mut last_sent: Local<f32>,
 ) {
-    if let Ok(mut transform) = query.get_single_mut() {
+    if let Ok((mut controller, transform)) = query.get_single_mut() {
         let x = (player_input.right as i8 - player_input.left as i8) as f32;
         let z = (player_input.down as i8 - player_input.up as i8) as f32;
 
         if x != 0.0 || z != 0.0 {
             let forward = transform.forward();
             let right = transform.right();
-
-            // Project movement onto horizontal plane
-            let forward = Vec3::new(forward.x, 0.0, forward.z).normalize();
-            let right = Vec3::new(right.x, 0.0, right.z).normalize();
-
-            let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
             
-            // Only apply horizontal movement
-            transform.translation += Vec3::new(movement.x, 0.0, movement.z);
+            let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
+            controller.translation = Some(movement);  // Set desired movement
 
             // Send position updates at 20Hz
             if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
@@ -203,6 +201,8 @@ pub fn move_player_body(
                 client.send_message(ClientChannel::Input, message);
                 *last_sent = time.elapsed_secs();
             }
+        } else {
+            controller.translation = Some(Vec3::ZERO);  // Stop movement
         }
     }
 }
@@ -237,6 +237,7 @@ pub fn player_input(
     player_input.right = keyboard_input.pressed(KeyCode::KeyD);
     player_input.up = keyboard_input.pressed(KeyCode::KeyW);
     player_input.down = keyboard_input.pressed(KeyCode::KeyS);
+    player_input.interact = keyboard_input.pressed(KeyCode::KeyE);
 
     // Send if client is connected
     if client.is_connected() {
@@ -275,5 +276,22 @@ pub fn grab_mouse(
 
     if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
         cursor_state.locked = true;
+    }
+}
+
+pub fn handle_interaction(
+    player_input: Res<PlayerInput>,
+    mut client: ResMut<RenetClient>,
+    mut last_interact: Local<f32>,
+    time: Res<Time>,
+) {
+    if player_input.interact {
+        // Only send interact message once every 0.5 seconds
+        if time.elapsed_secs() - *last_interact > 0.5 {
+            let input = ClientInput::Interact;
+            let message = bincode::serialize(&input).unwrap();
+            client.send_message(ClientChannel::Input, message);
+            *last_interact = time.elapsed_secs();
+        }
     }
 }
