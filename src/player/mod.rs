@@ -46,7 +46,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use bevy::{
     color::palettes::tailwind, input::mouse::AccumulatedMouseMotion, pbr::NotShadowCaster,
-    prelude::*, render::view::RenderLayers,
+    prelude::*, render::view::RenderLayers, window::PrimaryWindow,
 };
 use bevy_rapier3d::prelude::*;
 use bevy_renet::renet::{ClientId, RenetClient};
@@ -141,58 +141,119 @@ pub fn spawn_view_model(
 
 pub fn move_player(
     accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    mut query: Query<(&mut KinematicCharacterController, &mut Transform, &CameraSensitivity), With<ControlledPlayer>>,
+    mut query: Query<
+        (
+            &mut Transform,
+            Option<&mut KinematicCharacterController>,
+            Option<&CameraSensitivity>,
+        ),
+        With<ControlledPlayer>,
+    >,
     mut client: ResMut<RenetClient>,
     time: Res<Time>,
     mut last_sent: Local<f32>,
+    cursor_state: Res<CursorState>,
 ) {
-    if let Ok((mut controller, mut transform, camera_sensitivity)) = query.get_single_mut() {
-        let delta = accumulated_mouse_motion.delta;
+    // Log cursor state
+    info!(
+        "move_player called - cursor locked: {}",
+        cursor_state.locked
+    );
 
-        if delta != Vec2::ZERO {
-            let delta_yaw = -delta.x * camera_sensitivity.x;
-            let delta_pitch = -delta.y * camera_sensitivity.y;
+    // Only process mouse input when cursor is locked
+    if !cursor_state.locked {
+        info!("Cursor not locked, skipping mouse input processing");
+        return;
+    }
 
-            let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
-            yaw += delta_yaw;
+    // Log query result
+    let query_result = query.get_single_mut();
+    if query_result.is_err() {
+        info!("No entity with ControlledPlayer found");
+        return;
+    }
 
-            // Prevent looking too far up/down
-            const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-            pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    let (mut transform, controller_opt, camera_sensitivity_opt) = query_result.unwrap();
 
-            transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
-            
-            // Update character controller's up direction based on rotation
+    // Use default sensitivity if not found
+    let camera_sensitivity = camera_sensitivity_opt.map(|s| **s).unwrap_or_else(|| {
+        info!("No CameraSensitivity found, using default");
+        Vec2::new(0.003, 0.002)
+    });
+
+    let delta = accumulated_mouse_motion.delta;
+
+    // Log mouse motion
+    info!("Mouse delta: {:?}", delta);
+
+    if delta != Vec2::ZERO {
+        let delta_yaw = -delta.x * camera_sensitivity.x;
+        let delta_pitch = -delta.y * camera_sensitivity.y;
+
+        info!(
+            "Applying rotation - yaw: {}, pitch: {}",
+            delta_yaw, delta_pitch
+        );
+
+        let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
+        yaw += delta_yaw;
+
+        // Prevent looking too far up/down
+        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+        pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+
+        // Update character controller's up direction if it exists
+        if let Some(mut controller) = controller_opt {
             controller.up = transform.up().into();
-
-            // Send rotation updates at most 20 times per second
-            if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
-                let input = ClientInput::Rotation(transform.rotation);
-                let message = bincode::serialize(&input).unwrap();
-                client.send_message(ClientChannel::Input, message);
-                *last_sent = time.elapsed_secs();
-            }
         }
+
+        // Send rotation updates at most 20 times per second
+        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
+            info!("Sending rotation update to server");
+            let input = ClientInput::Rotation(transform.rotation);
+            let message = bincode::serialize(&input).unwrap();
+            client.send_message(ClientChannel::Input, message);
+            *last_sent = time.elapsed_secs();
+        }
+    } else {
+        info!("No mouse movement detected");
     }
 }
 
 pub fn move_player_body(
-    mut query: Query<(&mut KinematicCharacterController, &Transform), With<ControlledPlayer>>,
+    mut query: Query<
+        (&mut Transform, Option<&mut KinematicCharacterController>),
+        With<ControlledPlayer>,
+    >,
     player_input: Res<PlayerInput>,
     time: Res<Time>,
     mut client: ResMut<RenetClient>,
     mut last_sent: Local<f32>,
 ) {
-    if let Ok((mut controller, transform)) = query.get_single_mut() {
+    if let Ok((mut transform, controller_opt)) = query.get_single_mut() {
         let x = (player_input.right as i8 - player_input.left as i8) as f32;
         let z = (player_input.down as i8 - player_input.up as i8) as f32;
 
         if x != 0.0 || z != 0.0 {
+            // Get forward and right vectors but project them onto the horizontal plane
             let forward = transform.forward();
             let right = transform.right();
             
-            let movement = (forward * -z + right * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
-            controller.translation = Some(movement);  // Set desired movement
+            // Project vectors onto the horizontal (XZ) plane by zeroing out the Y component
+            let forward_horizontal = Vec3::new(forward.x, 0.0, forward.z).normalize();
+            let right_horizontal = Vec3::new(right.x, 0.0, right.z).normalize();
+            
+            // Calculate movement using the horizontal vectors
+            let movement = (forward_horizontal * -z + right_horizontal * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
+
+            // Apply movement using character controller if available, otherwise directly update transform
+            if let Some(mut controller) = controller_opt {
+                controller.translation = Some(movement);
+            } else {
+                transform.translation += movement;
+            }
 
             // Send position updates at 20Hz
             if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
@@ -201,8 +262,8 @@ pub fn move_player_body(
                 client.send_message(ClientChannel::Input, message);
                 *last_sent = time.elapsed_secs();
             }
-        } else {
-            controller.translation = Some(Vec3::ZERO);  // Stop movement
+        } else if let Some(mut controller) = controller_opt {
+            controller.translation = Some(Vec3::ZERO); // Stop movement
         }
     }
 }
@@ -248,34 +309,41 @@ pub fn player_input(
 }
 
 pub fn grab_mouse(
-    mut windows: Query<&mut Window>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
     key: Res<ButtonInput<KeyCode>>,
     mut cursor_state: ResMut<CursorState>,
 ) {
-    let mut window = windows.single_mut();
+    let Ok(mut window) = windows.get_single_mut() else {
+        info!("No primary window found");
+        return;
+    };
 
-    if cursor_state.locked {
-        // Force cursor to center
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
+    // Log current state
+    info!("grab_mouse called - cursor locked: {}", cursor_state.locked);
+    info!(
+        "Window cursor state - visible: {}, grab_mode: {:?}",
+        window.cursor_options.visible, window.cursor_options.grab_mode
+    );
 
-        // Get window center
-        let half_width = window.resolution.width() / 2.0;
-        let half_height = window.resolution.height() / 2.0;
-
-        // Set cursor position to center
-        window.set_cursor_position(Some(Vec2::new(half_width, half_height)));
-    }
-
-    if key.just_pressed(KeyCode::Escape) {
+    // Handle toggling cursor lock state
+    if key.just_pressed(KeyCode::Escape) && cursor_state.locked {
+        info!("Escape pressed, unlocking cursor");
         cursor_state.locked = false;
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
-        window.cursor_options.visible = true;
+    } else if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
+        info!("Left mouse pressed, locking cursor");
+        cursor_state.locked = true;
     }
 
-    if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
-        cursor_state.locked = true;
+    // Apply the appropriate cursor mode based on state
+    if cursor_state.locked {
+        window.cursor_options.visible = false;
+        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
+        info!("Applied locked cursor mode");
+    } else {
+        window.cursor_options.visible = true;
+        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
+        info!("Applied unlocked cursor mode");
     }
 }
 
