@@ -8,21 +8,23 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::EguiPlugin;
+use bevy_egui::{egui, EguiContexts};
 use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
 use bevy_rapier3d::prelude::{
-    Ccd, CoefficientCombineRule, Collider, Damping, Friction, GravityScale, LockedAxes,
-    Restitution, RigidBody, Sensor,
+    Ccd, CoefficientCombineRule, Collider, Damping, Friction, GravityScale,
+    KinematicCharacterController, LockedAxes, Restitution, RigidBody, Sensor,
 };
 use bevy_renet::renet::ClientId;
 use bevy_renet::{client_connected, renet::RenetClient, RenetClientPlugin};
 use multiplayer::bot::Velocity;
+use multiplayer::entities::PlayerBundle;
 use multiplayer::network::{
     ClientChannel, ClientLobby, ControlledPlayer, CurrentClientId, NetworkMapping, PlayerInfo,
     ServerChannel,
 };
 use multiplayer::player::{
-    change_fov, grab_mouse, move_player, move_player_body, player_input, spawn_view_model,
-    CameraSensitivity, CursorState, Player, VIEW_MODEL_RENDER_LAYER,
+    change_fov, grab_mouse, handle_interaction, move_player, move_player_body, player_input,
+    spawn_view_model, CameraSensitivity, CursorState, Player, VIEW_MODEL_RENDER_LAYER,
 };
 use multiplayer::world::{spawn_lights, spawn_world_model, WorldModelCamera, DEFAULT_RENDER_LAYER};
 use multiplayer::{
@@ -156,6 +158,7 @@ fn main() {
             move_player_body,
             grab_mouse,
             change_fov,
+            handle_interaction,
         ),
     );
 
@@ -201,37 +204,14 @@ fn client_sync_players(
                     let arm = meshes.add(Cuboid::new(0.1, 0.1, 0.5));
                     let arm_material = materials.add(Color::from(tailwind::TEAL_200));
 
-                    commands
-                        .spawn((
-                            Player { id },
-                            CameraSensitivity::default(),
-                            Transform::from_translation(Vec3::from(translation)),
-                            RigidBody::Dynamic,
-                            Collider::capsule(
-                                Vec3::new(0.0, 0.5, 0.0),
-                                Vec3::new(0.0, 1.5, 0.0),
-                                0.5,
-                            ),
-                            Velocity::default(),
-                            LockedAxes::ROTATION_LOCKED_X
-                                | LockedAxes::ROTATION_LOCKED_Z
-                                | LockedAxes::ROTATION_LOCKED_Y,
-                            Friction {
-                                coefficient: 0.5,
-                                combine_rule: CoefficientCombineRule::Min,
-                            },
-                            Restitution {
-                                coefficient: 0.0,
-                                combine_rule: CoefficientCombineRule::Min,
-                            },
-                            Damping {
-                                linear_damping: 0.5,
-                                angular_damping: 1.0,
-                            },
-                            ControlledPlayer,
-                            Visibility::Visible,
-                            RenderLayers::layer(DEFAULT_RENDER_LAYER),
+                    let player_entity = commands
+                        .spawn(PlayerBundle::new(
+                            client_id,
+                            Transform::from_xyz(0.0, 2.0, 0.0),
+                            &mut meshes,
+                            &mut materials,
                         ))
+                        .insert(ControlledPlayer)
                         .with_children(|parent| {
                             // World model camera (sees layer 0)
                             parent.spawn((
@@ -267,7 +247,16 @@ fn client_sync_players(
                                 RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
                                 NotShadowCaster,
                             ));
-                        });
+                        })
+                        .id();
+
+                    // Add to lobby/mapping
+                    let player_info = PlayerInfo {
+                        server_entity: entity,
+                        client_entity: player_entity,
+                    };
+                    lobby.players.insert(id, player_info);
+                    network_mapping.0.insert(entity, player_entity);
                 } else {
                     // For other players, spawn with matching collider but as sensor
                     let client_entity = commands
