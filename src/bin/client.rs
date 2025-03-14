@@ -6,6 +6,7 @@ use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::Vec3,
     prelude::*,
+    gltf::GltfAssetLabel,
 };
 use bevy_egui::EguiPlugin;
 use bevy_egui::{egui, EguiContexts};
@@ -26,7 +27,10 @@ use multiplayer::player::{
     change_fov, grab_mouse, handle_interaction, move_player, move_player_body, player_input,
     spawn_view_model, CameraSensitivity, CursorState, Player, VIEW_MODEL_RENDER_LAYER,
 };
-use multiplayer::world::{spawn_lights, spawn_world_model, WorldModelCamera, DEFAULT_RENDER_LAYER};
+use multiplayer::world::{
+    equip_item_system, spawn_lights, spawn_world_model, PlayerEquipment, WorldModelCamera,
+    DEFAULT_RENDER_LAYER,
+};
 use multiplayer::{
     network::{connection_config, NetworkedEntities, ServerMessages},
     player::{PlayerCommand, PlayerInput},
@@ -148,6 +152,7 @@ fn main() {
     app.add_systems(Startup, spawn_lights);
 
     app.insert_resource(CursorState::default());
+    app.insert_resource(PlayerEquipment::default());
 
     app.configure_sets(Update, Connected.run_if(client_connected));
 
@@ -160,6 +165,7 @@ fn main() {
             grab_mouse,
             change_fov,
             handle_interaction,
+            equip_item_system,
         ),
     );
 
@@ -177,6 +183,9 @@ fn client_sync_players(
     mut lobby: ResMut<ClientLobby>,
     mut network_mapping: ResMut<NetworkMapping>,
     controlled_players: Query<Entity, With<ControlledPlayer>>,
+    children_query: Query<&Children>,
+    names: Query<&Name>,
+    asset_server: Res<AssetServer>,
 ) {
     if !client.is_connected() {
         return;
@@ -324,6 +333,50 @@ fn client_sync_players(
             ServerMessages::DespawnProjectile { entity } => {
                 if let Some(entity) = network_mapping.0.remove(&entity) {
                     commands.entity(entity).despawn();
+                }
+            }
+            ServerMessages::EquipItem { player_id, item_entity, item_name, item_model } => {
+                info!("Player {} equipped item: {}", player_id, item_name);
+                
+                // If this is another player, update their visual state
+                if player_id != client_id {
+                    if let Some(player_info) = lobby.players.get(&player_id) {
+                        // Hide the world model of the item
+                        if let Some(world_item) = network_mapping.0.get(&item_entity) {
+                            commands.entity(*world_item).insert(Visibility::Hidden);
+                        }
+                        
+                        // Add a view model to the other player (simplified version)
+                        let model_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(item_model));
+                        commands.entity(player_info.client_entity).with_children(|parent| {
+                            parent.spawn((
+                                SceneRoot(model_handle),
+                                Transform::from_xyz(0.4, -0.3, -0.5)
+                                    .with_scale(Vec3::splat(0.5)),
+                                RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                                Name::new(format!("Equipped_{}", item_name)),
+                            ));
+                        });
+                    }
+                }
+            }
+            ServerMessages::UnequipItem { player_id } => {
+                info!("Player {} unequipped item", player_id);
+                
+                // If this is another player, update their visual state
+                if player_id != client_id {
+                    if let Some(player_info) = lobby.players.get(&player_id) {
+                        // Find and remove any equipped items from this player
+                        if let Ok(children) = children_query.get(player_info.client_entity) {
+                            for child in children.iter() {
+                                if let Ok(name) = names.get(*child) {
+                                    if name.as_str().starts_with("Equipped_") {
+                                        commands.entity(*child).despawn_recursive();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

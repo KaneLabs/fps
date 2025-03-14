@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::player::PlayerInput;
 
+pub const PROTOCOL_ID: u64 = 7;
+
 #[derive(Debug, Default, Resource)]
 pub struct ServerLobby {
     pub players: HashMap<ClientId, Entity>,
@@ -31,7 +33,7 @@ pub struct ClientLobby {
 }
 
 #[derive(Resource, Debug)]
-pub struct CurrentClientId(pub u64);
+pub struct CurrentClientId(pub ClientId);
 
 pub enum ClientChannel {
     Input,
@@ -59,6 +61,15 @@ pub enum ServerMessages {
     DespawnProjectile {
         entity: Entity,
     },
+    EquipItem {
+        player_id: ClientId,
+        item_entity: Entity,
+        item_name: String,
+        item_model: String,
+    },
+    UnequipItem {
+        player_id: ClientId,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -74,6 +85,10 @@ pub enum ClientInput {
     Position(Vec3),
     Rotation(Quat),
     Interact,
+    EquipItem {
+        item_entity: Entity,
+    },
+    UnequipItem,
 }
 
 impl From<ClientChannel> for u8 {

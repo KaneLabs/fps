@@ -8,7 +8,7 @@ use bevy::gltf::GltfAssetLabel;
 use crate::entities::PictureFrameBundle;
 use crate::entities::WorldObjectBundle;
 use crate::network::ControlledPlayer;
-use crate::player::VIEW_MODEL_RENDER_LAYER;
+use crate::player::{PlayerInput, VIEW_MODEL_RENDER_LAYER};
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -20,6 +20,26 @@ pub const DEFAULT_RENDER_LAYER: usize = 0;
 
 #[derive(Component)]
 pub struct ControlsUI; // Marker to track if UI exists
+
+/// Component for items that can be equipped by the player
+#[derive(Component)]
+pub struct Equippable {
+    pub name: String,
+    pub model_path: String,
+    pub interaction_distance: f32,
+}
+
+/// Component for the currently equipped item
+#[derive(Component)]
+pub struct EquippedItem {
+    pub name: String,
+}
+
+/// Resource to track the player's equipped item
+#[derive(Resource, Default)]
+pub struct PlayerEquipment {
+    pub equipped_item: Option<Entity>,
+}
 
 pub fn spawn_world_model(
     mut commands: Commands,
@@ -67,6 +87,15 @@ pub fn spawn_world_model(
             .with_scale(Vec3::splat(1.8))
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+        Equippable {
+            name: "Pickaxe".to_string(),
+            model_path: "dirty-pickaxe.glb".to_string(),
+            interaction_distance: 2.0,
+        },
+        // Add a collider for interaction detection
+        Collider::cuboid(0.3, 0.1, 0.3),
+        Sensor,
+        Name::new("Pickaxe"),
     ));
 
     commands.spawn((
@@ -160,6 +189,92 @@ pub fn log_collisions(mut collision_events: EventReader<CollisionEvent>) {
                     "Collision stopped between entities: {:?} and {:?}",
                     entity1, entity2
                 );
+            }
+        }
+    }
+}
+
+pub fn equip_item_system(
+    mut commands: Commands,
+    player_query: Query<(Entity, &Transform), With<ControlledPlayer>>,
+    equippable_query: Query<(Entity, &Transform, &Equippable)>,
+    player_input: Res<PlayerInput>,
+    mut equipment: ResMut<PlayerEquipment>,
+    asset_server: Res<AssetServer>,
+    mut last_interact: Local<f32>,
+    time: Res<Time>,
+    mut client: ResMut<bevy_renet::renet::RenetClient>,
+) {
+    // Only process if the player pressed E and enough time has passed since last interaction
+    if player_input.interact && time.elapsed_secs() - *last_interact > 0.5 {
+        *last_interact = time.elapsed_secs();
+        
+        if let Ok((player_entity, player_transform)) = player_query.get_single() {
+            // Check if player is already holding something
+            if let Some(equipped_entity) = equipment.equipped_item {
+                // Unequip the current item
+                commands.entity(equipped_entity).despawn_recursive();
+                equipment.equipped_item = None;
+                info!("Unequipped item");
+                
+                // Send unequip message to server
+                if client.is_connected() {
+                    let input = crate::network::ClientInput::UnequipItem;
+                    let message = bincode::serialize(&input).unwrap();
+                    client.send_message(crate::network::ClientChannel::Command, message);
+                }
+                
+                return;
+            }
+            
+            // Find the closest equippable item within interaction distance
+            let mut closest_item = None;
+            let mut closest_distance = f32::MAX;
+            
+            for (entity, transform, equippable) in equippable_query.iter() {
+                let distance = player_transform.translation.distance(transform.translation);
+                if distance <= equippable.interaction_distance && distance < closest_distance {
+                    closest_distance = distance;
+                    closest_item = Some((entity, equippable.name.clone(), equippable.model_path.clone()));
+                }
+            }
+            
+            // Process the closest item if found
+            if let Some((equippable_entity, name, model_path)) = closest_item {
+                info!("Equipping {}", name);
+                
+                // Load the model for the view model
+                let model_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(model_path.clone()));
+                
+                // Spawn the view model as a child of the player
+                let view_model_entity = commands.spawn((
+                    SceneRoot(model_handle),
+                    Transform::from_xyz(0.4, -0.3, -0.5)
+                        .with_scale(Vec3::splat(0.5))
+                        .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+                    RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+                    EquippedItem {
+                        name: name.clone(),
+                    },
+                )).id();
+                
+                // Add the view model as a child of the player
+                commands.entity(player_entity).add_child(view_model_entity);
+                
+                // Update the equipment resource
+                equipment.equipped_item = Some(view_model_entity);
+                
+                // Hide the world model of the item
+                commands.entity(equippable_entity).insert(Visibility::Hidden);
+                
+                // Send equip message to server
+                if client.is_connected() {
+                    let input = crate::network::ClientInput::EquipItem {
+                        item_entity: equippable_entity,
+                    };
+                    let message = bincode::serialize(&input).unwrap();
+                    client.send_message(crate::network::ClientChannel::Command, message);
+                }
             }
         }
     }
