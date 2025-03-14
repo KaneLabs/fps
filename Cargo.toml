@@ -32,6 +32,8 @@ bevy = {version = "0.15", default-features = false, features = [
   "serialize",
   "bevy_window",
   "png",
+  "jpeg",
+  "bevy_gltf",
 ]}
 
 bevy_egui = "0.31.1"

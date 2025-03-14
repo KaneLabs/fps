@@ -154,51 +154,37 @@ pub fn move_player(
     mut last_sent: Local<f32>,
     cursor_state: Res<CursorState>,
 ) {
-    // Log cursor state
-    info!(
-        "move_player called - cursor locked: {}",
-        cursor_state.locked
-    );
-
     // Only process mouse input when cursor is locked
     if !cursor_state.locked {
-        info!("Cursor not locked, skipping mouse input processing");
         return;
     }
 
     // Log query result
     let query_result = query.get_single_mut();
     if query_result.is_err() {
-        info!("No entity with ControlledPlayer found");
         return;
     }
 
     let (mut transform, controller_opt, camera_sensitivity_opt) = query_result.unwrap();
 
     // Use default sensitivity if not found
-    let camera_sensitivity = camera_sensitivity_opt.map(|s| **s).unwrap_or_else(|| {
-        info!("No CameraSensitivity found, using default");
-        Vec2::new(0.003, 0.002)
-    });
 
     let delta = accumulated_mouse_motion.delta;
 
-    // Log mouse motion
-    info!("Mouse delta: {:?}", delta);
-
     if delta != Vec2::ZERO {
+        let camera_sensitivity = camera_sensitivity_opt
+            .map(|s| **s)
+            .unwrap_or_else(|| Vec2::new(0.003, 0.002));
+
         let delta_yaw = -delta.x * camera_sensitivity.x;
         let delta_pitch = -delta.y * camera_sensitivity.y;
 
-        info!(
-            "Applying rotation - yaw: {}, pitch: {}",
-            delta_yaw, delta_pitch
-        );
+
+        // Prevent looking too far up/down
 
         let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
         yaw += delta_yaw;
 
-        // Prevent looking too far up/down
         const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
         pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
@@ -217,8 +203,6 @@ pub fn move_player(
             client.send_message(ClientChannel::Input, message);
             *last_sent = time.elapsed_secs();
         }
-    } else {
-        info!("No mouse movement detected");
     }
 }
 
@@ -240,13 +224,15 @@ pub fn move_player_body(
             // Get forward and right vectors but project them onto the horizontal plane
             let forward = transform.forward();
             let right = transform.right();
-            
+
             // Project vectors onto the horizontal (XZ) plane by zeroing out the Y component
             let forward_horizontal = Vec3::new(forward.x, 0.0, forward.z).normalize();
             let right_horizontal = Vec3::new(right.x, 0.0, right.z).normalize();
-            
+
             // Calculate movement using the horizontal vectors
-            let movement = (forward_horizontal * -z + right_horizontal * x).normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
+            let movement = (forward_horizontal * -z + right_horizontal * x).normalize()
+                * PLAYER_MOVE_SPEED
+                * time.delta_secs();
 
             // Apply movement using character controller if available, otherwise directly update transform
             if let Some(mut controller) = controller_opt {
@@ -315,23 +301,13 @@ pub fn grab_mouse(
     mut cursor_state: ResMut<CursorState>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
-        info!("No primary window found");
         return;
     };
 
-    // Log current state
-    info!("grab_mouse called - cursor locked: {}", cursor_state.locked);
-    info!(
-        "Window cursor state - visible: {}, grab_mode: {:?}",
-        window.cursor_options.visible, window.cursor_options.grab_mode
-    );
-
     // Handle toggling cursor lock state
     if key.just_pressed(KeyCode::Escape) && cursor_state.locked {
-        info!("Escape pressed, unlocking cursor");
         cursor_state.locked = false;
     } else if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
-        info!("Left mouse pressed, locking cursor");
         cursor_state.locked = true;
     }
 
@@ -339,11 +315,9 @@ pub fn grab_mouse(
     if cursor_state.locked {
         window.cursor_options.visible = false;
         window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
-        info!("Applied locked cursor mode");
     } else {
         window.cursor_options.visible = true;
         window.cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
-        info!("Applied unlocked cursor mode");
     }
 }
 

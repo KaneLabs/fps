@@ -3,6 +3,7 @@ use bevy::render::render_graph::Node;
 use bevy::{color::palettes::tailwind, prelude::*, render::view::RenderLayers};
 use bevy_egui::{egui, EguiContexts};
 use bevy_rapier3d::prelude::*;
+use bevy::gltf::GltfAssetLabel;
 
 use crate::entities::PictureFrameBundle;
 use crate::entities::WorldObjectBundle;
@@ -56,6 +57,18 @@ pub fn spawn_world_model(
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 
+    // Load and spawn the GLTF model on the table
+    // Using the approach from the Bevy documentation
+    let model_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset("dirty-pickaxe.glb"));
+
+    commands.spawn((
+        SceneRoot(model_handle),
+        Transform::from_xyz(0.0, 0.5, -3.0)
+            .with_scale(Vec3::splat(1.8))
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+
     commands.spawn((
         Mesh3d(wall.clone()),
         MeshMaterial3d(material.clone()),
@@ -96,7 +109,7 @@ pub fn spawn_world_model(
             &mut meshes,
             &mut materials,
             &asset_server,
-            Vec3::new(0.0, 2.5, -3.0),
+            Vec3::new(0.0, 2.5, -4.9),
             Vec2::new(1.0, 1.0),
         ),
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),

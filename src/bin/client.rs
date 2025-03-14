@@ -144,7 +144,8 @@ fn main() {
 
     app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
 
-    app.add_systems(Startup, (spawn_world_model, spawn_lights));
+    app.add_systems(Startup, spawn_world_model);
+    app.add_systems(Startup, spawn_lights);
 
     app.insert_resource(CursorState::default());
 
@@ -191,7 +192,7 @@ fn client_sync_players(
                 entity,
             } => {
                 info!(
-                    "Client: Received player create - ID: {}, Entity: {:?}, Is Local: {}, Current Client ID: {}",
+                    "Player Connected: {}, Entity: {:?}, Is Local: {}, Current Client ID: {}",
                     id,
                     entity,
                     id == client_id,

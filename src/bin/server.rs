@@ -133,10 +133,8 @@ fn main() {
 
     app.add_systems(PostUpdate, projectile_on_removal_system);
 
-    app.add_systems(
-        Startup,
-        (spawn_world_model, setup_debug_camera, spawn_lights).chain(),
-    );
+    app.add_systems(Startup, spawn_world_model);
+    app.add_systems(Startup, (setup_debug_camera, spawn_lights).chain());
 
     app.add_event::<CollisionEvent>();
 
