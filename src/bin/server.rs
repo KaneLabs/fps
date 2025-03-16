@@ -257,45 +257,68 @@ fn server_update_system(
 
     for client_id in server.clients_id() {
         while let Some(message) = server.receive_message(client_id, ClientChannel::Command) {
-            // Try to deserialize as PlayerCommand first
-            if let Ok(command) = bincode::deserialize::<PlayerCommand>(&message) {
-                match command {
-                    PlayerCommand::BasicAttack { mut cast_at } => {
-                        println!(
-                            "Received basic attack from client {}: {:?}",
-                            client_id, cast_at
-                        );
+            let command: PlayerCommand = bincode::deserialize(&message).unwrap();
+            match command {
+                PlayerCommand::BasicAttack { mut cast_at } => {
+                    println!(
+                        "Received basic attack from client {}: {:?}",
+                        client_id, cast_at
+                    );
 
-                        if let Some(player_entity) = lobby.players.get(&client_id) {
-                            if let Ok((_, _, player_transform)) = players.get(*player_entity) {
-                                cast_at[1] = player_transform.translation[1];
+                    if let Some(player_entity) = lobby.players.get(&client_id) {
+                        if let Ok((_, _, player_transform)) = players.get(*player_entity) {
+                            cast_at[1] = player_transform.translation[1];
 
-                                let direction =
-                                    (cast_at - player_transform.translation).normalize_or_zero();
-                                let mut translation = player_transform.translation + (direction * 0.7);
-                                translation[1] = 1.0;
+                            let direction =
+                                (cast_at - player_transform.translation).normalize_or_zero();
+                            let mut translation = player_transform.translation + (direction * 0.7);
+                            translation[1] = 1.0;
 
-                                let fireball_entity = spawn_fireball(
-                                    &mut commands,
-                                    &mut meshes,
-                                    &mut materials,
-                                    translation,
-                                    direction,
-                                );
-                                let message = ServerMessages::SpawnProjectile {
-                                    entity: fireball_entity,
-                                    translation: translation.into(),
-                                };
-                                let message = bincode::serialize(&message).unwrap();
-                                server.broadcast_message(ServerChannel::ServerMessages, message);
-                            }
+                            let fireball_entity = spawn_fireball(
+                                &mut commands,
+                                &mut meshes,
+                                &mut materials,
+                                translation,
+                                direction,
+                            );
+                            let message = ServerMessages::SpawnProjectile {
+                                entity: fireball_entity,
+                                translation: translation.into(),
+                            };
+                            let message = bincode::serialize(&message).unwrap();
+                            server.broadcast_message(ServerChannel::ServerMessages, message);
                         }
                     }
                 }
             }
-            // If not a PlayerCommand, try to deserialize as ClientInput
-            else if let Ok(input) = bincode::deserialize::<ClientInput>(&message) {
-                match input {
+        }
+        while let Some(message) = server.receive_message(client_id, ClientChannel::Input) {
+            if let Some(player_entity) = lobby.players.get(&client_id) {
+                match bincode::deserialize(&message).unwrap() {
+                    ClientInput::Movement(input) => {
+                        commands.entity(*player_entity).insert(input);
+                    }
+                    ClientInput::Rotation(rotation) => {
+                        if let Ok((entity, _, transform)) = players.get(*player_entity) {
+                            commands.entity(entity).insert(Transform {
+                                rotation,
+                                ..transform.clone()
+                            });
+                        }
+                    }
+                    ClientInput::Position(position) => {
+                        // Optionally validate position before applying
+                        if let Ok((entity, _, transform)) = players.get(*player_entity) {
+                            commands.entity(entity).insert(Transform {
+                                translation: position,
+                                ..transform.clone()
+                            });
+                        }
+                    }
+                    ClientInput::Interact => {
+                        info!("Player {} tried to interact", client_id);
+                        // Handle interaction (we can add specific interaction logic later)
+                    }
                     ClientInput::EquipItem { item_entity } => {
                         info!("Player {} is equipping item {:?}", client_id, item_entity);
                         
@@ -344,40 +367,6 @@ fn server_update_system(
                         let message = bincode::serialize(&message).unwrap();
                         server.broadcast_message(ServerChannel::ServerMessages, message);
                     }
-                    _ => {}
-                }
-            }
-        }
-        
-        // Handle regular input messages
-        while let Some(message) = server.receive_message(client_id, ClientChannel::Input) {
-            if let Ok(input) = bincode::deserialize::<ClientInput>(&message) {
-                match input {
-                    ClientInput::Movement(input) => {
-                        if let Some(player_entity) = lobby.players.get(&client_id) {
-                            if let Ok((_, player, _)) = players.get(*player_entity) {
-                                commands.entity(*player_entity).insert(input);
-                            }
-                        }
-                    }
-                    ClientInput::Rotation(rotation) => {
-                        if let Some(player_entity) = lobby.players.get(&client_id) {
-                            commands
-                                .entity(*player_entity)
-                                .insert(Transform::from_rotation(rotation));
-                        }
-                    }
-                    ClientInput::Position(position) => {
-                        if let Some(player_entity) = lobby.players.get(&client_id) {
-                            commands
-                                .entity(*player_entity)
-                                .insert(Transform::from_translation(position));
-                        }
-                    }
-                    ClientInput::Interact => {
-                        info!("Player {} is interacting", client_id);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -401,7 +390,6 @@ fn update_projectiles_system(
 fn server_network_sync(
     mut server: ResMut<RenetServer>,
     query: Query<(Entity, &Transform), Or<(With<Player>, With<Projectile>)>>,
-    equipped_items_query: Query<&ServerEquippedItem>,
     time: Res<Time>,
     mut sync_timer: ResMut<NetworkSyncTimer>,
 ) {
@@ -416,11 +404,6 @@ fn server_network_sync(
             .translations
             .push(transform.translation.into());
         networked_entities.rotations.push(transform.rotation.into());
-        
-        // If this entity has an equipped item, include it in the sync
-        if let Ok(equipped_item) = equipped_items_query.get(entity) {
-            info!("Syncing equipped item: {:?} for player entity: {:?}", equipped_item.item_entity, entity);
-        }
     }
 
     if !networked_entities.entities.is_empty() {

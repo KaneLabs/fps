@@ -221,7 +221,7 @@ pub fn equip_item_system(
                 if client.is_connected() {
                     let input = crate::network::ClientInput::UnequipItem;
                     let message = bincode::serialize(&input).unwrap();
-                    client.send_message(crate::network::ClientChannel::Command, message);
+                    client.send_message(crate::network::ClientChannel::Input, message);
                 }
                 
                 return;
@@ -273,7 +273,7 @@ pub fn equip_item_system(
                         item_entity: equippable_entity,
                     };
                     let message = bincode::serialize(&input).unwrap();
-                    client.send_message(crate::network::ClientChannel::Command, message);
+                    client.send_message(crate::network::ClientChannel::Input, message);
                 }
             }
         }
