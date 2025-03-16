@@ -204,6 +204,7 @@ pub fn equip_item_system(
     mut last_interact: Local<f32>,
     time: Res<Time>,
     mut client: ResMut<bevy_renet::renet::RenetClient>,
+    visibility_query: Query<&Visibility>,
 ) {
     // Only process if the player pressed E and enough time has passed since last interaction
     if player_input.interact && time.elapsed_secs() - *last_interact > 0.5 {
@@ -212,16 +213,46 @@ pub fn equip_item_system(
         if let Ok((player_entity, player_transform)) = player_query.get_single() {
             // Check if player is already holding something
             if let Some(equipped_entity) = equipment.equipped_item {
+                // Find the item entity that was equipped
+                let mut item_entity = None;
+                
+                // Find the world model of the equipped item
+                for (entity, _, equippable) in equippable_query.iter() {
+                    if let Ok(visibility) = visibility_query.get(entity) {
+                        if *visibility == Visibility::Hidden {
+                            item_entity = Some((entity, equippable.name.clone()));
+                            break;
+                        }
+                    }
+                }
+                
                 // Unequip the current item
                 commands.entity(equipped_entity).despawn_recursive();
                 equipment.equipped_item = None;
-                info!("Unequipped item");
                 
-                // Send unequip message to server
-                if client.is_connected() {
-                    let input = crate::network::ClientInput::UnequipItem;
-                    let message = bincode::serialize(&input).unwrap();
-                    client.send_message(crate::network::ClientChannel::Input, message);
+                // Drop the item to the floor
+                if let Some((entity, name)) = item_entity {
+                    info!("Unequipped and dropped {} to the floor", name);
+                    
+                    // Get player position to drop the item nearby
+                    let drop_position = player_transform.translation + player_transform.forward() * 1.0;
+                    
+                    // Make the item visible again and update its position
+                    commands.entity(entity).insert((
+                        Visibility::Visible,
+                        Transform::from_translation(drop_position)
+                            .with_scale(Vec3::splat(1.8))
+                            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+                    ));
+                    
+                    // Send unequip message to server
+                    if client.is_connected() {
+                        let input = crate::network::ClientInput::UnequipItem;
+                        let message = bincode::serialize(&input).unwrap();
+                        client.send_message(crate::network::ClientChannel::Input, message);
+                    }
+                } else {
+                    info!("Unequipped item");
                 }
                 
                 return;

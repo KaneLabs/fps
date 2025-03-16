@@ -376,6 +376,8 @@ fn client_sync_players(
                                 }
                             }
                         }
+                        
+                        // The server will handle making the world item visible again and updating its position
                     }
                 }
             }

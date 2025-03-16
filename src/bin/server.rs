@@ -349,14 +349,24 @@ fn server_update_system(
                     ClientInput::UnequipItem => {
                         info!("Player {} is unequipping item", client_id);
                         
-                        // Find the player's equipped item
+                        // Find the player's equipped item and transform
                         if let Some(player_entity) = lobby.players.get(&client_id) {
                             if let Ok((_, equipped_item)) = equipped_items_query.get(*player_entity) {
-                                // Show the item in the world again
-                                commands.entity(equipped_item.item_entity).insert(Visibility::Visible);
-                                
-                                // Remove the equipped item component
-                                commands.entity(*player_entity).remove::<ServerEquippedItem>();
+                                if let Ok((_, _, player_transform)) = players.get(*player_entity) {
+                                    // Calculate drop position in front of the player
+                                    let drop_position = player_transform.translation + player_transform.forward() * 1.0;
+                                    
+                                    // Show the item in the world again and update its position
+                                    commands.entity(equipped_item.item_entity).insert((
+                                        Visibility::Visible,
+                                        Transform::from_translation(drop_position)
+                                            .with_scale(Vec3::splat(1.8))
+                                            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+                                    ));
+                                    
+                                    // Remove the equipped item component
+                                    commands.entity(*player_entity).remove::<ServerEquippedItem>();
+                                }
                             }
                         }
                         
