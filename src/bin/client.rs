@@ -28,8 +28,8 @@ use multiplayer::player::{
     spawn_view_model, CameraSensitivity, CursorState, Player, VIEW_MODEL_RENDER_LAYER,
 };
 use multiplayer::world::{
-    equip_item_system, spawn_lights, spawn_world_model, PlayerEquipment, WorldModelCamera,
-    DEFAULT_RENDER_LAYER,
+    equip_item_system, interaction_ui_system, spawn_lights, spawn_world_model, InteractionState, 
+    PlayerEquipment, WorldModelCamera, DEFAULT_RENDER_LAYER, tool_interaction_system,
 };
 use multiplayer::{
     network::{connection_config, NetworkedEntities, ServerMessages},
@@ -153,6 +153,7 @@ fn main() {
 
     app.insert_resource(CursorState::default());
     app.insert_resource(PlayerEquipment::default());
+    app.insert_resource(InteractionState::default());
 
     app.configure_sets(Update, Connected.run_if(client_connected));
 
@@ -166,6 +167,8 @@ fn main() {
             change_fov,
             handle_interaction,
             equip_item_system,
+            tool_interaction_system,
+            interaction_ui_system,
         ),
     );
 

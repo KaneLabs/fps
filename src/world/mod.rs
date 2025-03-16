@@ -41,6 +41,33 @@ pub struct PlayerEquipment {
     pub equipped_item: Option<Entity>,
 }
 
+/// Component for objects that can be interacted with using tools
+#[derive(Component)]
+pub struct Interactable {
+    pub required_tool: Option<String>, // "Pickaxe", etc.
+    pub interaction_distance: f32,
+    pub interaction_time: f32, // For actions that take time
+    pub interaction_progress: f32, // Current progress (0.0 to interaction_time)
+}
+
+impl Default for Interactable {
+    fn default() -> Self {
+        Self {
+            required_tool: None,
+            interaction_distance: 2.0,
+            interaction_time: 1.0,
+            interaction_progress: 0.0,
+        }
+    }
+}
+
+/// Resource to track interaction progress
+#[derive(Resource, Default)]
+pub struct InteractionState {
+    pub current_target: Option<Entity>,
+    pub progress: f32,
+}
+
 pub fn spawn_world_model(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -141,6 +168,23 @@ pub fn spawn_world_model(
             Vec3::new(0.0, 2.5, -4.9),
             Vec2::new(1.0, 1.0),
         ),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+    
+    // Add an ore block that can be mined with the pickaxe
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.5, 0.5, 0.5))),
+        MeshMaterial3d(materials.add(Color::from(tailwind::SLATE_700))),
+        Transform::from_xyz(2.0, 0.5, -3.0),
+        RigidBody::Fixed,
+        Collider::cuboid(0.25, 0.25, 0.25),
+        Name::new("Ore Block"),
+        Interactable {
+            required_tool: Some("Pickaxe".to_string()),
+            interaction_distance: 2.0,
+            interaction_time: 3.0, // Takes 3 seconds to mine
+            interaction_progress: 0.0,
+        },
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 }
@@ -307,6 +351,169 @@ pub fn equip_item_system(
                     client.send_message(crate::network::ClientChannel::Input, message);
                 }
             }
+        }
+    }
+}
+
+/// System to handle tool-based interactions (like mining ore with pickaxe)
+pub fn tool_interaction_system(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    player_query: Query<(Entity, &Transform), With<ControlledPlayer>>,
+    equipped_items_query: Query<&EquippedItem>,
+    mut interactables_query: Query<(Entity, &Transform, &mut Interactable)>,
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    equipment: Res<PlayerEquipment>,
+    mut interaction_state: ResMut<InteractionState>,
+    time: Res<Time>,
+) {
+    // Only process if the player is holding the left mouse button
+    if mouse_input.pressed(MouseButton::Left) {
+        if let Ok((player_entity, player_transform)) = player_query.get_single() {
+            // Check if player has an equipped item
+            let equipped_tool = if let Some(equipped_entity) = equipment.equipped_item {
+                equipped_items_query.get(equipped_entity).ok().map(|item| item.name.clone())
+            } else {
+                None
+            };
+            
+            // Find the closest interactable within range
+            let mut closest_interactable = None;
+            let mut closest_distance = f32::MAX;
+            
+            for (entity, transform, interactable) in interactables_query.iter_mut() {
+                let distance = player_transform.translation.distance(transform.translation);
+                
+                // Check if within interaction distance and requires the equipped tool (or no tool)
+                if distance <= interactable.interaction_distance && 
+                   (interactable.required_tool.is_none() || 
+                    interactable.required_tool.as_ref() == equipped_tool.as_ref()) {
+                    if distance < closest_distance {
+                        closest_distance = distance;
+                        closest_interactable = Some(entity);
+                    }
+                }
+            }
+            
+            // Process interaction with the closest interactable
+            if let Some(interactable_entity) = closest_interactable {
+                // If we're already interacting with this entity, continue the interaction
+                if interaction_state.current_target == Some(interactable_entity) {
+                    if let Ok((_, transform, mut interactable)) = interactables_query.get_mut(interactable_entity) {
+                        // Increase progress
+                        interactable.interaction_progress += time.delta_secs();
+                        interaction_state.progress = interactable.interaction_progress;
+                        
+                        // Check if interaction is complete
+                        if interactable.interaction_progress >= interactable.interaction_time {
+                            info!("Interaction complete with entity {:?}", interactable_entity);
+                            
+                            // Get the position before dropping the mutable borrow
+                            let spawn_position = transform.translation;
+                            
+                            // Reset progress
+                            interactable.interaction_progress = 0.0;
+                            interaction_state.current_target = None;
+                            interaction_state.progress = 0.0;
+                            
+                            // Spawn result after releasing the borrow
+                            spawn_interaction_result(
+                                &mut commands, 
+                                &mut meshes, 
+                                &mut materials, 
+                                spawn_position
+                            );
+                        }
+                    }
+                } else {
+                    // Start new interaction
+                    interaction_state.current_target = Some(interactable_entity);
+                    interaction_state.progress = 0.0;
+                    
+                    if let Ok((_, _, mut interactable)) = interactables_query.get_mut(interactable_entity) {
+                        interactable.interaction_progress = 0.0;
+                    }
+                    
+                    info!("Started interaction with entity {:?}", interactable_entity);
+                }
+            }
+        }
+    } else {
+        // Reset interaction state when not interacting
+        if interaction_state.current_target.is_some() {
+            if let Some(entity) = interaction_state.current_target {
+                if let Ok((_, _, mut interactable)) = interactables_query.get_mut(entity) {
+                    interactable.interaction_progress = 0.0;
+                }
+            }
+            
+            interaction_state.current_target = None;
+            interaction_state.progress = 0.0;
+        }
+    }
+}
+
+// Helper function to spawn the result of an interaction (like ore)
+fn spawn_interaction_result(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    position: Vec3,
+) {
+    // Spawn a simple ore chunk
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.2, 0.2, 0.2))),
+        MeshMaterial3d(materials.add(Color::from(tailwind::SLATE_500))),
+        Transform::from_translation(position + Vec3::new(0.0, 0.3, 0.0)),
+        RigidBody::Dynamic,
+        Collider::cuboid(0.1, 0.1, 0.1),
+        Name::new("Ore Chunk"),
+        Equippable {
+            name: "Ore Chunk".to_string(),
+            model_path: "ore_chunk.glb".to_string(), // You'd need to create this model
+            interaction_distance: 2.0,
+        },
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+}
+
+pub fn interaction_ui_system(
+    mut contexts: EguiContexts,
+    interaction_state: Res<InteractionState>,
+    interactables_query: Query<&Interactable>,
+) {
+    if let Some(target) = interaction_state.current_target {
+        if interaction_state.progress > 0.0 {
+            // Get the interactable to determine the max time
+            let max_time = if let Ok(interactable) = interactables_query.get(target) {
+                interactable.interaction_time
+            } else {
+                3.0 // Default fallback
+            };
+            
+            // Get screen dimensions
+            let screen_rect = contexts.ctx_mut().screen_rect();
+            
+            // Create a small panel at the bottom of the screen
+            egui::Window::new("Mining Progress")
+                .title_bar(false)
+                .resizable(false)
+                .collapsible(false)
+                .fixed_pos(egui::pos2(
+                    screen_rect.width() / 2.0 - 100.0, 
+                    screen_rect.height() - 70.0
+                ))
+                .fixed_size(egui::vec2(200.0, 50.0))
+                .show(contexts.ctx_mut(), |ui| {
+                    // Show percentage
+                    let percent = (interaction_state.progress / max_time * 100.0) as i32;
+                    ui.label(format!("Mining... {}%", percent));
+                    
+                    // Add progress bar
+                    ui.add(egui::ProgressBar::new(interaction_state.progress / max_time)
+                        .desired_width(200.0));
+                });
         }
     }
 }
