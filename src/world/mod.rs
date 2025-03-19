@@ -172,10 +172,12 @@ pub fn spawn_world_model(
     ));
     
     // Add an ore block that can be mined with the pickaxe
+    let ore_model_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset("ore_chunk.glb"));
+
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.5, 0.5, 0.5))),
-        MeshMaterial3d(materials.add(Color::from(tailwind::SLATE_700))),
-        Transform::from_xyz(2.0, 0.5, -3.0),
+        SceneRoot(ore_model_handle),
+        Transform::from_xyz(2.0, 0.5, -3.0)
+            .with_scale(Vec3::splat(1.0)),
         RigidBody::Fixed,
         Collider::cuboid(0.25, 0.25, 0.25),
         Name::new("Ore Block"),
@@ -367,6 +369,7 @@ pub fn tool_interaction_system(
     equipment: Res<PlayerEquipment>,
     mut interaction_state: ResMut<InteractionState>,
     time: Res<Time>,
+    asset_server: Res<AssetServer>,
 ) {
     // Only process if the player is holding the left mouse button
     if mouse_input.pressed(MouseButton::Left) {
@@ -417,13 +420,24 @@ pub fn tool_interaction_system(
                             interaction_state.current_target = None;
                             interaction_state.progress = 0.0;
                             
-                            // Spawn result after releasing the borrow
-                            spawn_interaction_result(
-                                &mut commands, 
-                                &mut meshes, 
-                                &mut materials, 
-                                spawn_position
-                            );
+                            // Load the ore chunk model
+                            let model_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset("ore_chunk.glb"));
+                            
+                            // Spawn the ore chunk with the model
+                            commands.spawn((
+                                SceneRoot(model_handle),
+                                Transform::from_translation(spawn_position + Vec3::new(0.0, 0.3, 0.0))
+                                    .with_scale(Vec3::splat(0.5)),
+                                RigidBody::Dynamic,
+                                Collider::cuboid(0.1, 0.1, 0.1),
+                                Name::new("Ore Chunk"),
+                                Equippable {
+                                    name: "Ore Chunk".to_string(),
+                                    model_path: "ore_chunk.glb".to_string(),
+                                    interaction_distance: 2.0,
+                                },
+                                RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+                            ));
                         }
                     }
                 } else {
@@ -452,30 +466,6 @@ pub fn tool_interaction_system(
             interaction_state.progress = 0.0;
         }
     }
-}
-
-// Helper function to spawn the result of an interaction (like ore)
-fn spawn_interaction_result(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-    position: Vec3,
-) {
-    // Spawn a simple ore chunk
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.2, 0.2, 0.2))),
-        MeshMaterial3d(materials.add(Color::from(tailwind::SLATE_500))),
-        Transform::from_translation(position + Vec3::new(0.0, 0.3, 0.0)),
-        RigidBody::Dynamic,
-        Collider::cuboid(0.1, 0.1, 0.1),
-        Name::new("Ore Chunk"),
-        Equippable {
-            name: "Ore Chunk".to_string(),
-            model_path: "ore_chunk.glb".to_string(), // You'd need to create this model
-            interaction_distance: 2.0,
-        },
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
 }
 
 pub fn interaction_ui_system(
