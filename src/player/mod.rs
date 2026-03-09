@@ -1,106 +1,51 @@
-//! This example showcases a 3D first-person camera.
-//!
-//! The setup presented here is a very common way of organizing a first-person game
-//! where the player can see their own arms. We use two industry terms to differentiate
-//! the kinds of models we have:
-//!
-//! - The *view model* is the model that represents the player's body.
-//! - The *world model* is everything else.
-//!
-//! ## Motivation
-//!
-//! The reason for this distinction is that these two models should be rendered with different field of views (FOV).
-//! The view model is typically designed and animated with a very specific FOV in mind, so it is
-//! generally *fixed* and cannot be changed by a player. The world model, on the other hand, should
-//! be able to change its FOV to accommodate the player's preferences for the following reasons:
-//! - *Accessibility*: How prone is the player to motion sickness? A wider FOV can help.
-//! - *Tactical preference*: Does the player want to see more of the battlefield?
-//!     Or have a more zoomed-in view for precision aiming?
-//! - *Physical considerations*: How well does the in-game FOV match the player's real-world FOV?
-//!     Are they sitting in front of a monitor or playing on a TV in the living room? How big is the screen?
-//!
-//! ## Implementation
-//!
-//! The `Player` is an entity holding two cameras, one for each model. The view model camera has a fixed
-//! FOV of 70 degrees, while the world model camera has a variable FOV that can be changed by the player.
-//!
-//! We use different `RenderLayers` to select what to render.
-//!
-//! - The world model camera has no explicit `RenderLayers` component, so it uses the layer 0.
-//!     All static objects in the scene are also on layer 0 for the same reason.
-//! - The view model camera has a `RenderLayers` component with layer 1, so it only renders objects
-//!     explicitly assigned to layer 1. The arm of the player is one such object.
-//!     The order of the view model camera is additionally bumped to 1 to ensure it renders on top of the world model.
-//! - The light source in the scene must illuminate both the view model and the world model, so it is
-//!     assigned to both layers 0 and 1.
-//!
-//! ## Controls
-//!
-//! | Key Binding          | Action        |
-//! |:---------------------|:--------------|
-//! | mouse                | Look around   |
-//! | arrow up             | Decrease FOV  |
-//! | arrow down           | Increase FOV  |
-
 use std::f32::consts::FRAC_PI_2;
 
+use avian3d::prelude::*;
 use bevy::{
-    color::palettes::tailwind, input::mouse::AccumulatedMouseMotion, pbr::NotShadowCaster,
-    prelude::*, render::view::RenderLayers, window::PrimaryWindow,
+    input::mouse::AccumulatedMouseMotion,
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use bevy_rapier3d::prelude::*;
-use bevy_renet::renet::{ClientId, RenetClient};
-use serde::{Deserialize, Serialize};
+use bevy_enhanced_input::prelude::*;
 
-use crate::{
-    network::{ClientChannel, ClientInput, ControlledPlayer, CurrentClientId, ServerLobby},
-    world::WorldModelCamera,
-};
+use crate::protocol::{CharacterVelocity, JumpAction, MoveAction, PlayerContext, PlayerEquipped, PlayerPitch};
+
+pub const PLAYER_MOVE_SPEED: f32 = 7.0;
+pub const JUMP_SPEED: f32 = 10.0;
+pub const GRAVITY: f32 = 32.0;
+pub const SKIN_WIDTH: f32 = 0.02;
+pub const STEP_HEIGHT: f32 = 0.1;
+pub const VIEW_MODEL_RENDER_LAYER: usize = 1;
+pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+
+/// Capsule dimensions (must match Collider in physics bundle)
+const CAPSULE_RADIUS: f32 = 0.5;
+const CAPSULE_HEIGHT: f32 = 0.4;
+
+/// Surface normal must have Y > this to count as walkable ground (~45° max slope)
+const MIN_GROUND_NORMAL_Y: f32 = 0.7;
+
+// --- Shared Components (used by both server + client) ---
 
 #[derive(Debug, Component)]
 pub struct Player {
-    pub id: ClientId,
+    pub id: u64,
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Component, Resource)]
-pub struct PlayerInput {
-    pub up: bool,
-    pub down: bool,
-    pub left: bool,
-    pub right: bool,
-    pub interact: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Event)]
-pub enum PlayerCommand {
-    BasicAttack { cast_at: Vec3 },
-}
+// --- Client-Only Components ---
 
 #[derive(Debug, Component, Deref, DerefMut)]
 pub struct CameraSensitivity(Vec2);
 
 impl Default for CameraSensitivity {
     fn default() -> Self {
-        Self(
-            // These factors are just arbitrary mouse sensitivity values.
-            // It's often nicer to have a faster horizontal sensitivity than vertical.
-            // We use a component for them so that we can make them user-configurable at runtime
-            // for accessibility reasons.
-            // It also allows you to inspect them in an editor if you `Reflect` the component.
-            Vec2::new(0.003, 0.002),
-        )
+        Self(Vec2::new(0.003, 0.002))
     }
 }
 
-pub const PLAYER_MOVE_SPEED: f32 = 5.0;
-
-/// Used by the view model camera and the player's arm.
-/// The light source belongs to both layers.
-pub const VIEW_MODEL_RENDER_LAYER: usize = 1;
-
 #[derive(Resource)]
 pub struct CursorState {
-    locked: bool,
+    pub locked: bool,
 }
 
 impl Default for CursorState {
@@ -109,156 +54,409 @@ impl Default for CursorState {
     }
 }
 
-pub fn spawn_view_model(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    client_id: Res<CurrentClientId>,
-) {
-    commands
-        .spawn((
-            Player { id: client_id.0 },
-            CameraSensitivity::default(),
-            Transform::from_xyz(0.0, 1.0, 0.0),
-            RigidBody::Dynamic,
-            Collider::capsule(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.5),
-            Velocity::default(),
-            LockedAxes::ROTATION_LOCKED,
-            Friction::coefficient(0.0),
-            GravityScale(1.0),
-        ))
-        .with_children(|parent| {
-            // Just one camera with fixed FOV
-            parent.spawn(Camera3dBundle {
-                projection: Projection::Perspective(PerspectiveProjection {
-                    fov: 90.0_f32.to_radians(),
-                    ..default()
-                }),
-                ..default()
-            });
-        });
+/// Marker for the local (predicted) player entity
+#[derive(Component)]
+pub struct LocalPlayer;
+
+// --- Shared Bundles ---
+// These ensure server and client have identical physics/gameplay components.
+// Define once here, use in both server.rs and client.rs.
+
+/// Physics components for a player entity. Kinematic — we control Position directly
+/// via the character controller. Avian detects collisions but doesn't move us.
+pub fn player_physics_bundle() -> impl Bundle {
+    (
+        Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT),
+        RigidBody::Kinematic,
+    )
 }
 
-pub fn move_player(
-    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    mut query: Query<
-        (
-            &mut Transform,
-            Option<&mut KinematicCharacterController>,
-            Option<&CameraSensitivity>,
-        ),
-        With<ControlledPlayer>,
-    >,
-    mut client: ResMut<RenetClient>,
+/// Replicated gameplay state for a player entity.
+/// Server spawns these; client receives them via lightyear replication.
+pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
+    (
+        PlayerContext,
+        crate::protocol::PlayerId(client_id),
+        crate::protocol::PlayerYaw::default(),
+        PlayerPitch::default(),
+        PlayerEquipped::default(),
+        CharacterVelocity::default(),
+        Position(PLAYER_SPAWN_POS),
+        Rotation::default(),
+    )
+}
+
+// --- Shared Movement (observer, runs on both client + server) ---
+
+/// Handles MoveAction fire events. Input is already in world-space
+/// (pre-rotated by camera yaw on the client before BEI buffers it).
+pub fn shared_movement(
+    trigger: On<Fire<MoveAction>>,
+    mut query: Query<&mut CharacterVelocity>,
+) {
+    let input = trigger.value;
+
+    if let Ok(mut vel) = query.get_mut(trigger.context) {
+        if input == Vec2::ZERO {
+            vel.0.x = 0.0;
+            vel.0.z = 0.0;
+            return;
+        }
+
+        let move_dir = Vec2::new(input.x, input.y).normalize_or_zero();
+        vel.0.x = move_dir.x * PLAYER_MOVE_SPEED;
+        vel.0.z = move_dir.y * PLAYER_MOVE_SPEED;
+    }
+}
+
+/// Zeros XZ velocity every fixed tick. Fire<MoveAction> re-applies if keys are held.
+pub fn clear_xz_velocity(
+    mut query: Query<&mut CharacterVelocity, (With<PlayerContext>, With<Collider>)>,
+) {
+    for mut vel in query.iter_mut() {
+        vel.0.x = 0.0;
+        vel.0.z = 0.0;
+    }
+}
+
+/// Jump: set upward velocity if grounded. Shared between client + server.
+/// Does its own inline ground check (shape cast + normal filter) to avoid
+/// relying on deferred commands that may not flush between rollback ticks.
+pub fn shared_jump(
+    trigger: On<Fire<JumpAction>>,
+    mut query: Query<(&mut CharacterVelocity, &Position)>,
+    spatial_query: SpatialQuery,
+) {
+    let Ok((mut vel, position)) = query.get_mut(trigger.context) else {
+        return;
+    };
+    if vel.0.y > 0.5 {
+        return;
+    }
+
+    let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+    let config = ShapeCastConfig {
+        max_distance: 0.15,
+        target_distance: SKIN_WIDTH,
+        compute_contact_on_penetration: true,
+        ignore_origin_penetration: true,
+    };
+    let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
+
+    if let Some(hit) = spatial_query.cast_shape(
+        &capsule, position.0, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
+    ) {
+        if hit.normal1.y > MIN_GROUND_NORMAL_Y {
+            vel.0.y = JUMP_SPEED;
+        }
+    }
+}
+
+// --- Kinematic Character Controller ---
+
+/// Kinematic character controller. Runs every fixed tick on both client + server.
+/// Handles gravity, ground detection via shape cast, and move-and-slide collision.
+///
+/// Uses ParamSet because SpatialQuery reads Position internally (for all colliders),
+/// and we also need to write Position for players. We collect→compute→writeback.
+/// Kinematic character controller. Runs every fixed tick on both client + server.
+/// Handles gravity, ground detection via shape cast, and move-and-slide collision.
+///
+/// All Position-accessing params must live inside the ParamSet because SpatialQuery
+/// reads Position for all colliders, and we need to write Position for players.
+/// Flow: collect (p0) → shape cast (p1) → write back (p2).
+pub fn character_controller(
+    mut params: ParamSet<(
+        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+        SpatialQuery,
+        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+    )>,
     time: Res<Time>,
-    mut last_sent: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+    // Shorter capsule for horizontal casts — bottom raised by STEP_HEIGHT
+    // to prevent scraping the ground and gives basic stair-stepping
+    let h_capsule = Collider::capsule(CAPSULE_RADIUS, (CAPSULE_HEIGHT - STEP_HEIGHT * 2.0).max(0.0));
+
+    // 1. Collect current state
+    let players: Vec<(Entity, Vec3, Vec3)> = params
+        .p0()
+        .iter()
+        .map(|(e, p, v)| (e, p.0, v.0))
+        .collect();
+
+    // 2. Compute new positions using SpatialQuery
+    let spatial = params.p1();
+    let mut results: Vec<(Entity, Vec3, Vec3)> = Vec::with_capacity(players.len());
+
+    for (entity, mut pos, mut vel) in players {
+        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+
+        // Apply gravity
+        vel.y -= GRAVITY * dt;
+
+        // --- Horizontal move-and-slide ---
+        let h_vel = Vec3::new(vel.x, 0.0, vel.z);
+        if h_vel.length_squared() > 0.0001 {
+            let h_delta = h_vel * dt;
+            pos += move_and_slide(&spatial, &h_capsule, pos, h_delta, &filter);
+        }
+
+        // --- Vertical movement + ground detection ---
+        if vel.y <= 0.0 {
+            let fall_dist = vel.y.abs() * dt + 0.1;
+            let config = ShapeCastConfig {
+                max_distance: fall_dist,
+                target_distance: SKIN_WIDTH,
+                compute_contact_on_penetration: true,
+                ignore_origin_penetration: true,
+            };
+
+            match spatial.cast_shape(
+                &capsule, pos, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
+            ) {
+                Some(hit) if hit.normal1.y > MIN_GROUND_NORMAL_Y => {
+                    // Hit walkable ground — snap and zero vertical velocity
+                    if hit.distance > 0.0 {
+                        pos.y -= hit.distance;
+                    }
+                    vel.y = 0.0;
+                }
+                _ => {
+                    // Airborne or hit a wall/steep slope — keep falling
+                    pos.y += vel.y * dt;
+                }
+            }
+        } else {
+            // Moving upward (jumping) — cast for ceiling
+            let up_dist = vel.y * dt;
+            let config = ShapeCastConfig {
+                max_distance: up_dist,
+                target_distance: SKIN_WIDTH,
+                compute_contact_on_penetration: true,
+                ignore_origin_penetration: true,
+            };
+
+            match spatial.cast_shape(
+                &capsule, pos, Quat::IDENTITY, Dir3::Y, &config, &filter,
+            ) {
+                Some(hit) => {
+                    if hit.distance > 0.0 {
+                        pos.y += hit.distance;
+                    }
+                    vel.y = 0.0;
+                }
+                None => {
+                    pos.y += up_dist;
+                }
+            }
+        }
+
+        results.push((entity, pos, vel));
+    }
+
+    // 3. Write back results
+    drop(spatial);
+    let mut writeback = params.p2();
+    for (entity, new_pos, new_vel) in results {
+        if let Ok((mut pos, mut vel)) = writeback.get_mut(entity) {
+            pos.0 = new_pos;
+            vel.0 = new_vel;
+        }
+    }
+}
+
+/// Cast the player capsule in `delta` direction. On collision, slide along the surface.
+/// Returns the actual displacement to apply. Max 2 iterations (move + slide).
+fn move_and_slide(
+    spatial_query: &SpatialQuery,
+    shape: &Collider,
+    mut origin: Vec3,
+    mut remaining: Vec3,
+    filter: &SpatialQueryFilter,
+) -> Vec3 {
+    let mut total = Vec3::ZERO;
+
+    for _ in 0..2 {
+        let dist = remaining.length();
+        if dist < 0.0001 {
+            break;
+        }
+
+        let Ok(dir) = Dir3::new(remaining / dist) else {
+            break;
+        };
+
+        let config = ShapeCastConfig {
+            max_distance: dist,
+            target_distance: SKIN_WIDTH,
+            compute_contact_on_penetration: true,
+            ignore_origin_penetration: true,
+        };
+
+        match spatial_query.cast_shape(shape, origin, Quat::IDENTITY, dir, &config, filter) {
+            Some(hit) => {
+                // Move up to the surface (distance already accounts for skin via target_distance)
+                let step = dir.as_vec3() * hit.distance;
+                total += step;
+                origin += step;
+
+                // Project remaining movement onto the surface to slide
+                let leftover = dist - hit.distance;
+                if leftover < 0.001 {
+                    break;
+                }
+                let slide_vec = remaining.normalize() * leftover;
+                remaining = slide_vec - hit.normal1 * slide_vec.dot(hit.normal1);
+            }
+            None => {
+                total += remaining;
+                break;
+            }
+        }
+    }
+
+    total
+}
+
+/// Diagnostic: log player position/velocity every 2 seconds.
+pub fn log_player_state(
+    query: Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+    time: Res<Time>,
+    mut timer: Local<f32>,
+) {
+    *timer += time.delta_secs();
+    if *timer < 2.0 {
+        return;
+    }
+    *timer = 0.0;
+    for (entity, pos, vel) in query.iter() {
+        info!(
+            "[DIAG] entity={:?} pos=({:.1}, {:.1}, {:.1}) vel=({:.1}, {:.1}, {:.1})",
+            entity, pos.0.x, pos.0.y, pos.0.z, vel.0.x, vel.0.y, vel.0.z
+        );
+    }
+}
+
+// --- Client-Only Systems ---
+
+/// Pre-rotate MoveAction's raw WASD Vec2 by camera yaw so the value sent to the
+/// server is already in world-space. Runs between BEI Update and BufferClientInputs.
+pub fn pre_rotate_move_input(
+    player_query: Query<(&Children, Entity), With<LocalPlayer>>,
+    camera_query: Query<&Transform, With<crate::world::WorldModelCamera>>,
+    mut action_query: Query<
+        (&ActionOf<crate::protocol::PlayerContext>, &mut ActionValue),
+        With<Action<MoveAction>>,
+    >,
+) {
+    let Ok((children, _player_entity)) = player_query.single() else {
+        return;
+    };
+    let Some(cam_transform) = children.iter().find_map(|c| camera_query.get(c).ok()) else {
+        return;
+    };
+    let (yaw, _, _) = cam_transform.rotation.to_euler(EulerRot::YXZ);
+
+    for (_action_of, mut value) in action_query.iter_mut() {
+        if let ActionValue::Axis2D(v) = *value {
+            if v == Vec2::ZERO {
+                continue;
+            }
+            let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+            let right = Vec2::new(yaw.cos(), -yaw.sin());
+            let rotated = forward * v.y + right * v.x;
+            *value = ActionValue::Axis2D(rotated);
+        }
+    }
+}
+
+/// Sync camera yaw and pitch to replicated components so the server and other clients
+/// know our facing direction.
+pub fn sync_player_yaw(
+    player_query: Query<(&Children, Entity), With<LocalPlayer>>,
+    camera_query: Query<&Transform, With<crate::world::WorldModelCamera>>,
+    mut yaw_query: Query<(&mut crate::protocol::PlayerYaw, &mut PlayerPitch)>,
+) {
+    let Ok((children, entity)) = player_query.single() else {
+        return;
+    };
+    let Some(cam_transform) = children.iter().find_map(|c| camera_query.get(c).ok()) else {
+        return;
+    };
+    let (yaw, pitch, _) = cam_transform.rotation.to_euler(EulerRot::YXZ);
+    if let Ok((mut player_yaw, mut player_pitch)) = yaw_query.get_mut(entity) {
+        player_yaw.0 = yaw;
+        player_pitch.0 = pitch;
+    }
+}
+
+/// Mouse look: rotates the camera child entity (pitch + yaw). Visual only.
+pub fn mouse_look(
+    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
+    player_query: Query<&Children, With<LocalPlayer>>,
+    mut camera_query: Query<&mut Transform, With<crate::world::WorldModelCamera>>,
     cursor_state: Res<CursorState>,
 ) {
-    // Only process mouse input when cursor is locked
     if !cursor_state.locked {
         return;
     }
 
-    // Log query result
-    let query_result = query.get_single_mut();
-    if query_result.is_err() {
+    let delta = accumulated_mouse_motion.delta;
+    if delta == Vec2::ZERO {
         return;
     }
 
-    let (mut transform, controller_opt, camera_sensitivity_opt) = query_result.unwrap();
+    let Ok(children) = player_query.single() else {
+        return;
+    };
 
-    // Use default sensitivity if not found
+    for child in children.iter() {
+        if let Ok(mut cam_transform) = camera_query.get_mut(child) {
+            let (mut yaw, mut pitch, _roll) = cam_transform.rotation.to_euler(EulerRot::YXZ);
 
-    let delta = accumulated_mouse_motion.delta;
+            yaw += -delta.x * 0.003;
+            const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+            pitch = (pitch + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
-    if delta != Vec2::ZERO {
-        let camera_sensitivity = camera_sensitivity_opt
-            .map(|s| **s)
-            .unwrap_or_else(|| Vec2::new(0.003, 0.002));
-
-        let delta_yaw = -delta.x * camera_sensitivity.x;
-        let delta_pitch = -delta.y * camera_sensitivity.y;
-
-
-        // Prevent looking too far up/down
-
-        let (mut yaw, mut pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
-        yaw += delta_yaw;
-
-        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-        pitch = (pitch + delta_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
-
-        // Update character controller's up direction if it exists
-        if let Some(mut controller) = controller_opt {
-            controller.up = transform.up().into();
-        }
-
-        // Send rotation updates at most 20 times per second
-        if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
-            info!("Sending rotation update to server");
-            let input = ClientInput::Rotation(transform.rotation);
-            let message = bincode::serialize(&input).unwrap();
-            client.send_message(ClientChannel::Input, message);
-            *last_sent = time.elapsed_secs();
+            cam_transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
         }
     }
 }
 
-pub fn move_player_body(
-    mut query: Query<
-        (&mut Transform, Option<&mut KinematicCharacterController>),
-        With<ControlledPlayer>,
-    >,
-    player_input: Res<PlayerInput>,
-    time: Res<Time>,
-    mut client: ResMut<RenetClient>,
-    mut last_sent: Local<f32>,
+/// Grab/release cursor on click/escape
+pub fn grab_mouse(
+    mut cursor_options: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    key: Res<ButtonInput<KeyCode>>,
+    mut cursor_state: ResMut<CursorState>,
 ) {
-    if let Ok((mut transform, controller_opt)) = query.get_single_mut() {
-        let x = (player_input.right as i8 - player_input.left as i8) as f32;
-        let z = (player_input.down as i8 - player_input.up as i8) as f32;
+    let Ok(mut options) = cursor_options.single_mut() else {
+        return;
+    };
 
-        if x != 0.0 || z != 0.0 {
-            // Get forward and right vectors but project them onto the horizontal plane
-            let forward = transform.forward();
-            let right = transform.right();
+    if key.just_pressed(KeyCode::Escape) && cursor_state.locked {
+        cursor_state.locked = false;
+    } else if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
+        cursor_state.locked = true;
+    }
 
-            // Project vectors onto the horizontal (XZ) plane by zeroing out the Y component
-            let forward_horizontal = Vec3::new(forward.x, 0.0, forward.z).normalize();
-            let right_horizontal = Vec3::new(right.x, 0.0, right.z).normalize();
-
-            // Calculate movement using the horizontal vectors
-            let movement = (forward_horizontal * -z + right_horizontal * x).normalize()
-                * PLAYER_MOVE_SPEED
-                * time.delta_secs();
-
-            // Apply movement using character controller if available, otherwise directly update transform
-            if let Some(mut controller) = controller_opt {
-                controller.translation = Some(movement);
-            } else {
-                transform.translation += movement;
-            }
-
-            // Send position updates at 20Hz
-            if time.elapsed_secs() - *last_sent > 0.05 && client.is_connected() {
-                let input = ClientInput::Position(transform.translation);
-                let message = bincode::serialize(&input).unwrap();
-                client.send_message(ClientChannel::Input, message);
-                *last_sent = time.elapsed_secs();
-            }
-        } else if let Some(mut controller) = controller_opt {
-            controller.translation = Some(Vec3::ZERO); // Stop movement
-        }
+    if cursor_state.locked {
+        options.visible = false;
+        options.grab_mode = CursorGrabMode::Locked;
+    } else {
+        options.visible = true;
+        options.grab_mode = CursorGrabMode::None;
     }
 }
 
+/// Adjust FOV with arrow keys
 pub fn change_fov(
     input: Res<ButtonInput<KeyCode>>,
-    mut camera: Query<&mut Projection, With<WorldModelCamera>>,
+    mut camera: Query<&mut Projection, With<crate::world::WorldModelCamera>>,
 ) {
-    if let Ok(mut projection) = camera.get_single_mut() {
+    if let Ok(mut projection) = camera.single_mut() {
         let Projection::Perspective(ref mut perspective) = projection.as_mut() else {
             return;
         };
@@ -270,70 +468,6 @@ pub fn change_fov(
         if input.pressed(KeyCode::ArrowDown) {
             perspective.fov += 1.0_f32.to_radians();
             perspective.fov = perspective.fov.min(160.0_f32.to_radians());
-        }
-    }
-}
-
-pub fn player_input(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut player_input: ResMut<PlayerInput>,
-    mut client: ResMut<RenetClient>,
-) {
-    // Update input state
-    player_input.left = keyboard_input.pressed(KeyCode::KeyA);
-    player_input.right = keyboard_input.pressed(KeyCode::KeyD);
-    player_input.up = keyboard_input.pressed(KeyCode::KeyW);
-    player_input.down = keyboard_input.pressed(KeyCode::KeyS);
-    player_input.interact = keyboard_input.pressed(KeyCode::KeyE);
-
-    // Send if client is connected
-    if client.is_connected() {
-        let input = ClientInput::Movement(*player_input);
-        let message = bincode::serialize(&input).unwrap();
-        client.send_message(ClientChannel::Input, message);
-    }
-}
-
-pub fn grab_mouse(
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    key: Res<ButtonInput<KeyCode>>,
-    mut cursor_state: ResMut<CursorState>,
-) {
-    let Ok(mut window) = windows.get_single_mut() else {
-        return;
-    };
-
-    // Handle toggling cursor lock state
-    if key.just_pressed(KeyCode::Escape) && cursor_state.locked {
-        cursor_state.locked = false;
-    } else if mouse.just_pressed(MouseButton::Left) && !cursor_state.locked {
-        cursor_state.locked = true;
-    }
-
-    // Apply the appropriate cursor mode based on state
-    if cursor_state.locked {
-        window.cursor_options.visible = false;
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
-    } else {
-        window.cursor_options.visible = true;
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
-    }
-}
-
-pub fn handle_interaction(
-    player_input: Res<PlayerInput>,
-    mut client: ResMut<RenetClient>,
-    mut last_interact: Local<f32>,
-    time: Res<Time>,
-) {
-    if player_input.interact {
-        // Only send interact message once every 0.5 seconds
-        if time.elapsed_secs() - *last_interact > 0.5 {
-            let input = ClientInput::Interact;
-            let message = bincode::serialize(&input).unwrap();
-            client.send_message(ClientChannel::Input, message);
-            *last_interact = time.elapsed_secs();
         }
     }
 }
