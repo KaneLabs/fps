@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "multiplayer"
-version = "0.1.0"
+version = "0.3.0"
 
 [[bin]]
 name = "client"
@@ -15,33 +15,34 @@ path = "src/bin/server.rs"
 name = "multiplayer"
 path = "src/lib.rs"
 
-[features]
-default = ["netcode"]
-netcode = []
-
 [dependencies]
-bevy = {version = "0.15", default-features = false, features = [
+bevy = {version = "0.18", default-features = false, features = [
   "bevy_core_pipeline",
   "bevy_render",
   "bevy_asset",
   "bevy_pbr",
+  "bevy_light",
+  "bevy_gltf",
+  "bevy_window",
+  "bevy_state",
+  "bevy_log",
+  "bevy_scene",
+  "bevy_ui",
+  "bevy_text",
+  "default_font",
+  "serialize",
   "x11",
   "tonemapping_luts",
   "ktx2",
-  "zstd",
-  "serialize",
-  "bevy_window",
+  "zstd_rust",
   "png",
   "jpeg",
-  "bevy_gltf",
+  "reflect_auto_register",
 ]}
 
-bevy_egui = "0.31.1"
-bevy_rapier3d = "0.28.0"
-bevy_renet = {version = "1.0.0", features = ["netcode"], default-features = false}
-bincode = "1.3"
-fastrand = "2.0"
-renet_visualizer = {version = "*", features = ["bevy"]}
+lightyear = {version = "0.26", features = ["netcode", "udp", "input_bei", "avian3d", "frame_interpolation"]}
+avian3d = {version = "0.5", default-features = false, features = ["3d", "f32", "parry-f32", "serialize"]}
+bevy_enhanced_input = {version = "0.22", features = ["serialize"]}
+bevy_egui = "0.39"
+bevy_kira_audio = {version = "0.25", features = ["mp3"]}
 serde = {version = "1.0", features = ["derive"]}
-steamworks = {version = "0.11", optional = true}
-bevy_flycam = "0.15.0"
