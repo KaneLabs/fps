@@ -49,15 +49,25 @@ pub struct JumpAction;
 #[action_output(bool)]
 pub struct InteractAction;
 
-/// Left click → mine (bool, fires while held)
+/// Left click → primary action (mine, shoot, etc. depending on equipped item)
 #[derive(Debug, InputAction)]
 #[action_output(bool)]
-pub struct MineAction;
+pub struct PrimaryAction;
 
 /// Tracks which tool a player has equipped. Replicated so the server
 /// can validate mining and other players can see held items.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct PlayerEquipped(pub Option<String>);
+
+/// Player health. Server-authoritative, replicated to all clients.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlayerHealth(pub i32);
+
+impl Default for PlayerHealth {
+    fn default() -> Self {
+        Self(100)
+    }
+}
 
 // --- Protocol Plugin ---
 
@@ -75,7 +85,7 @@ impl Plugin for ProtocolPlugin {
         app.register_input_action::<MoveAction>();
         app.register_input_action::<JumpAction>();
         app.register_input_action::<InteractAction>();
-        app.register_input_action::<MineAction>();
+        app.register_input_action::<PrimaryAction>();
 
         // Replicated components
         app.register_component::<PlayerId>();
@@ -85,6 +95,7 @@ impl Plugin for ProtocolPlugin {
             .add_prediction();
         app.register_component::<PlayerEquipped>()
             .add_prediction();
+        app.register_component::<PlayerHealth>();
 
         // Avian3d physics components with prediction + interpolation
         // Matches lightyear FPS example: enable_correction() lets lightyear handle

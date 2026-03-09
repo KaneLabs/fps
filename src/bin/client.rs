@@ -56,6 +56,14 @@ struct MenuMusicHandle(Handle<AudioInstance>);
 #[derive(Resource)]
 struct AnimaCover(Handle<Image>);
 
+/// Line gradient image for accent divider.
+#[derive(Resource)]
+struct LineGradient(Handle<Image>);
+
+/// Tracks which menu item is selected (for keyboard navigation).
+#[derive(Resource, Default)]
+struct MenuSelection(usize);
+
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -266,6 +274,26 @@ fn blue(alpha: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(100, 160, 255, (alpha * 255.0) as u8)
 }
 
+/// Draw text with custom letter-spacing (in em units). Returns total width.
+fn draw_spaced_text(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    letter_spacing_em: f32,
+) -> f32 {
+    let spacing = font.size * letter_spacing_em;
+    let mut x = pos.x;
+    for ch in text.chars() {
+        let galley = painter.layout_no_wrap(ch.to_string(), font.clone(), color);
+        let char_width = galley.size().x;
+        painter.galley(egui::pos2(x, pos.y), galley, color);
+        x += char_width + spacing;
+    }
+    x - pos.x - spacing // total width (subtract trailing spacing)
+}
+
 /// Draw animated geometric shapes behind the menu content (centered on screen).
 fn draw_geometric_background(ui: &egui::Ui, t: f32) {
     let painter = ui.painter();
@@ -343,67 +371,6 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
     painter.line_segment([egui::pos2(rect.right() - margin, rect.bottom() - margin), egui::pos2(rect.right() - margin, rect.bottom() - margin - corner_len)], stroke);
 }
 
-/// Draw the menu title block: "PROJECT CODENAME" + "ANIMA" + accent line + subtitles.
-fn draw_menu_title(ui: &mut egui::Ui) {
-    // "PROJECT CODENAME" — small, spaced, blue at 0.7
-    ui.label(
-        egui::RichText::new("P R O J E C T   C O D E N A M E")
-            .font(chakra(12.0))
-            .color(blue(0.7)),
-    );
-
-    ui.add_space(8.0);
-
-    // "ANIMA" — large Cinzel Bold, cream #F0E8D8
-    // Title glow: two shadow layers behind the text
-    let title_font = cinzel_black(72.0);
-    let title_text = "ANIMA";
-
-    // Paint glow layers first (wide blur approximation via offset text)
-    let (_, title_rect) = ui.allocate_space(egui::vec2(ui.available_width(), 80.0));
-    let title_pos = egui::pos2(title_rect.left(), title_rect.center().y);
-    let painter = ui.painter();
-
-    // Outer glow — blue at 0.1, painted at slight offsets
-    for dx in [-2.0, 0.0, 2.0_f32] {
-        for dy in [-1.0, 0.0, 1.0_f32] {
-            if dx == 0.0 && dy == 0.0 { continue; }
-            painter.text(
-                title_pos + egui::vec2(dx, dy),
-                egui::Align2::LEFT_CENTER,
-                title_text, title_font.clone(), blue(0.1),
-            );
-        }
-    }
-    // Inner glow — blue at 0.2
-    painter.text(title_pos, egui::Align2::LEFT_CENTER, title_text, title_font.clone(), blue(0.2));
-    // Main title — cream
-    painter.text(title_pos, egui::Align2::LEFT_CENTER, title_text, title_font, cream(1.0));
-
-    ui.add_space(8.0);
-
-    // Accent divider line — blue at 0.8, fading to transparent
-    let (_, line_rect) = ui.allocate_space(egui::vec2(50.0, 2.0));
-    ui.painter().rect_filled(line_rect, 0.0, blue(0.8));
-
-    ui.add_space(16.0);
-
-    // Taglines — cream at 0.4
-    ui.label(
-        egui::RichText::new("P O S T - A P O C A L Y P T I C  ·  C O L O R A D O  ·  2 0 3 1")
-            .font(chakra(11.0))
-            .color(cream(0.4)),
-    );
-
-    ui.add_space(4.0);
-
-    ui.label(
-        egui::RichText::new("S U R V I V E .   B U I L D .   R E M E M B E R .")
-            .font(chakra(11.0))
-            .color(cream(0.4)),
-    );
-}
-
 // ========================================
 // Loading state
 // ========================================
@@ -417,8 +384,11 @@ fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AssetLoadTracker { handles });
 
     // Preload the Anima cover image for the menu
-    let cover: Handle<Image> = asset_server.load("images/anima-cover-darker.png");
+    let cover: Handle<Image> = asset_server.load("images/anima-cover.png");
     commands.insert_resource(AnimaCover(cover));
+
+    let line_grad: Handle<Image> = asset_server.load("images/line-gradient.png");
+    commands.insert_resource(LineGradient(line_grad));
 
     info!("Loading assets...");
 }
@@ -493,6 +463,7 @@ fn menu_enter(
     let music = asset_server.load("audio/menu.mp3");
     let handle = audio.play(music).looped().with_volume(0.5).handle();
     commands.insert_resource(MenuMusicHandle(handle));
+    commands.insert_resource(MenuSelection::default());
     info!("Main menu entered — music playing");
 }
 
@@ -501,17 +472,25 @@ fn menu_ui(
     keys: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<AppState>>,
     anima_cover: Option<Res<AnimaCover>>,
+    line_gradient: Option<Res<LineGradient>>,
+    mut menu_sel: ResMut<MenuSelection>,
     mut frame_count: Local<u32>,
 ) {
     *frame_count += 1;
     if *frame_count <= 2 { return; }
 
-    // Register the cover image with egui (must happen before ctx_mut borrow)
+    // Register images with egui (must happen before ctx_mut borrow)
     let cover_tex = anima_cover.as_ref().map(|c| {
         contexts.add_image(bevy_egui::EguiTextureHandle::Strong(c.0.clone()))
     });
+    let line_tex = line_gradient.as_ref().map(|l| {
+        contexts.add_image(bevy_egui::EguiTextureHandle::Strong(l.0.clone()))
+    });
 
     let Ok(ctx) = contexts.ctx_mut() else { return; };
+
+    let mut menu_anchor_x = 0.0_f32;
+    let mut menu_anchor_y = 0.0_f32;
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
@@ -545,99 +524,151 @@ fn menu_ui(
                 cream(0.2),
             );
 
-            // --- Right side content area — anchored to right half of screen ---
+            // --- Right side content — anchored to right half of screen ---
             let half = rect.center().x;
-            let padding = (rect.width() * 0.04).max(32.0); // 4% of screen, min 32px
+            let padding = (rect.width() * 0.04).max(32.0);
             let content_x = half + padding;
-            let content_width = rect.right() - content_x - padding;
-            let content_rect = egui::Rect::from_min_size(
-                egui::pos2(content_x, rect.top()),
-                egui::vec2(content_width, rect.height()),
+
+            // Vertically center the content block
+            let content_y = rect.top() + (rect.height() - 400.0).max(0.0) * 0.38;
+
+            // Title block — painted directly
+            let painter = ui.painter();
+            let mut y = content_y;
+
+            // "PROJECT CODENAME"
+            let galley = painter.layout_no_wrap(
+                "PROJECT CODENAME".into(), chakra(12.0), blue(0.7),
             );
+            draw_spaced_text(painter, egui::pos2(content_x, y), "PROJECT CODENAME", chakra(12.0), blue(0.7), 0.15);
+            y += galley.size().y + 8.0;
 
-            let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
-            child_ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                // Vertically center the content block
-                let space = (ui.available_height() - 400.0).max(0.0) * 0.38;
-                ui.add_space(space);
-
-                draw_menu_title(ui);
-
-                ui.add_space(40.0);
-
-                // Menu items: PLAY, SETTINGS, EXIT
-                let menu_items: &[(&str, &str, &str)] = &[
-                    ("PLAY",     "P L A Y",         "P  L  A  Y"),
-                    ("SETTINGS", "S E T T I N G S", "S  E  T  T  I  N  G  S"),
-                    ("EXIT",     "E X I T",         "E  X  I  T"),
-                ];
-
-                for (i, (raw, normal, wide)) in menu_items.iter().enumerate() {
-                    // Allocate a clickable/hoverable rect
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(220.0, 28.0),
-                        egui::Sense::click(),
-                    );
-
-                    let hovered = response.hovered();
-
-                    // Draw text — wider spacing + brighter on hover
-                    let (label, color) = if hovered {
-                        (*wide, cream(0.95))
-                    } else {
-                        (*normal, cream(0.5))
-                    };
-                    ui.painter().text(
-                        rect.left_center(),
-                        egui::Align2::LEFT_CENTER,
-                        label,
-                        chakra_bold(15.0),
-                        color,
-                    );
-
-                    // Blue indicator line shoots out on hover
-                    if hovered {
-                        let line_x = rect.left() - 12.0;
-                        let line_y = rect.center().y;
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(line_x - 24.0, line_y),
-                                egui::pos2(line_x, line_y),
-                            ],
-                            egui::Stroke::new(2.0, blue(0.8)),
-                        );
-                    }
-
-                    if response.clicked() {
-                        match i {
-                            0 => {
-                                info!("Menu: {} — entering game", raw);
-                                next_state.set(AppState::InGame);
-                            }
-                            // 1 => Settings (not yet implemented)
-                            2 => std::process::exit(0),
-                            _ => {}
-                        }
-                    }
+            // "ANIMA" title with glow
+            let title_font = cinzel_black(72.0);
+            for dx in [-2.0, 0.0, 2.0_f32] {
+                for dy in [-1.0, 0.0, 1.0_f32] {
+                    if dx == 0.0 && dy == 0.0 { continue; }
+                    draw_spaced_text(painter, egui::pos2(content_x + dx, y + dy), "ANIMA", title_font.clone(), blue(0.1), 0.15);
                 }
-            });
+            }
+            draw_spaced_text(painter, egui::pos2(content_x, y), "ANIMA", title_font.clone(), blue(0.2), 0.15);
+            draw_spaced_text(painter, egui::pos2(content_x, y), "ANIMA", title_font, cream(1.0), 0.15);
+            y += 80.0;
+
+            // Accent line — smooth gradient: blue 0.8 on left fading to transparent
+            let line_width = 180.0_f32;
+            let line_steps = 90; // 2px per step = smooth
+            let step_w = line_width / line_steps as f32;
+            for s in 0..line_steps {
+                let t = 1.0 - (s as f32 / (line_steps - 1) as f32); // 1.0 → 0.0
+                let strip = egui::Rect::from_min_size(
+                    egui::pos2(content_x + s as f32 * step_w, y),
+                    egui::vec2(step_w + 0.5, 2.0),
+                );
+                painter.rect_filled(strip, 0.0, blue(t * 0.8));
+            }
+            y += 18.0;
+
+            // Taglines
+            draw_spaced_text(painter, egui::pos2(content_x, y), "POST-APOCALYPTIC · COLORADO · 2031", chakra(11.0), cream(0.4), 0.1);
+            y += 18.0;
+            draw_spaced_text(painter, egui::pos2(content_x, y), "SURVIVE. BUILD. REMEMBER.", chakra(11.0), cream(0.4), 0.1);
+            y += 40.0;
+
+            // Store position for the menu Area
+            menu_anchor_x = content_x;
+            menu_anchor_y = y;
 
             // --- Scanline overlay — faint horizontal lines across entire screen ---
             let scanline_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 18);
-            let mut y = rect.top();
-            while y < rect.bottom() {
+            let mut scan_y = rect.top();
+            while scan_y < rect.bottom() {
                 ui.painter().line_segment(
-                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                    [egui::pos2(rect.left(), scan_y), egui::pos2(rect.right(), scan_y)],
                     egui::Stroke::new(1.0, scanline_color),
                 );
-                y += 3.0;
+                scan_y += 3.0;
             }
         });
 
-    // Enter key also starts the game
-    if keys.just_pressed(KeyCode::Enter) {
-        next_state.set(AppState::InGame);
+    // Menu items — separate egui Window for guaranteed interaction
+    let menu_items = ["PLAY", "SETTINGS", "EXIT"];
+    let num_items = menu_items.len();
+
+    // Keyboard navigation
+    if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::Tab) {
+        menu_sel.0 = (menu_sel.0 + 1) % num_items;
     }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        menu_sel.0 = if menu_sel.0 == 0 { num_items - 1 } else { menu_sel.0 - 1 };
+    }
+
+    // Enter/Space activates selected item
+    let kb_activate = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
+
+    egui::Area::new(egui::Id::new("main_menu_items"))
+        .fixed_pos(egui::pos2(menu_anchor_x, menu_anchor_y))
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+            ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::TRANSPARENT;
+            ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::TRANSPARENT;
+            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            ui.style_mut().visuals.widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+            ui.style_mut().visuals.widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
+
+            for (i, raw) in menu_items.iter().enumerate() {
+                let selected = menu_sel.0 == i;
+
+                let color = if selected { cream(0.95) } else { cream(0.5) };
+                let text = egui::RichText::new(*raw)
+                    .font(cinzel_bold(15.0))
+                    .color(color);
+
+                let btn = ui.add(
+                    egui::Button::new(text)
+                        .frame(false)
+                        .min_size(egui::vec2(300.0, 28.0)),
+                );
+
+                // Mouse hover updates selection
+                if btn.hovered() {
+                    menu_sel.0 = i;
+                }
+
+                // Blue gradient indicator line for selected item
+                if selected {
+                    if let Some(tex_id) = line_tex {
+                        let line_w = 36.0;
+                        let line_h = 2.0;
+                        let line_rect = egui::Rect::from_min_size(
+                            egui::pos2(btn.rect.left() - line_w - 8.0, btn.rect.center().y - line_h / 2.0),
+                            egui::vec2(line_w, line_h),
+                        );
+                        ui.painter().image(
+                            tex_id,
+                            line_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
+
+                let activated = btn.clicked() || (selected && kb_activate);
+                if activated {
+                    match i {
+                        0 => {
+                            info!("Menu: {} — entering game", raw);
+                            next_state.set(AppState::InGame);
+                        }
+                        // 1 => Settings (not yet implemented)
+                        2 => std::process::exit(0),
+                        _ => {}
+                    }
+                }
+            }
+        });
 }
 
 // ========================================
@@ -795,7 +826,7 @@ fn on_predicted_spawn(
     ));
     commands.spawn((
         ActionOf::<PlayerContext>::new(entity),
-        Action::<MineAction>::new(),
+        Action::<PrimaryAction>::new(),
         Bindings::spawn(Spawn(Binding::from(MouseButton::Left))),
     ));
 }

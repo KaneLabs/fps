@@ -57,7 +57,7 @@ impl Plugin for SharedPlugin {
         app.add_observer(player::shared_jump);
         app.add_observer(world::shared_door_interact);
         app.add_observer(world::shared_equip_interact);
-        app.add_observer(world::shared_mine);
+        app.add_observer(world::shared_primary_action);
 
         // Diagnostic logging
         app.add_systems(Update, player::log_player_state);

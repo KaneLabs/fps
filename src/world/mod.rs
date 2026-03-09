@@ -8,7 +8,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::player::VIEW_MODEL_RENDER_LAYER;
-use crate::protocol::{InteractAction, MineAction, PlayerEquipped, PlayerPitch, PlayerYaw};
+use crate::protocol::{InteractAction, PrimaryAction, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -747,93 +747,123 @@ pub fn shared_equip_interact(
     }
 }
 
-/// Shared observer: mine interactable objects when player holds left click.
+/// Shared observer: primary action — routes to mine or shoot based on equipped item.
 /// Rollback-safe: stores `mine_start_secs` (absolute time) and computes progress
 /// as `current_time - start_time`. Idempotent — replaying the same tick
 /// during rollback produces the same result without double-counting.
 ///
 /// Only the server handles despawn + ore chunk spawn (replicates to all clients).
-pub fn shared_mine(
-    trigger: On<Fire<MineAction>>,
-    player_query: Query<(&Position, &PlayerEquipped, Has<Predicted>)>,
+pub fn shared_primary_action(
+    trigger: On<Fire<PrimaryAction>>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, Has<Predicted>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
+    mut health_query: Query<(Entity, &mut PlayerHealth, &Position), Without<PlayerEquipped>>,
+    spatial_query: SpatialQuery,
     mut commands: Commands,
+    mut last_shot: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, equipped, is_predicted)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, equipped, is_predicted)) = player_query.get(trigger.context) else {
         return;
     };
 
-    let current_secs = time.elapsed_secs();
-    let equipped_tool = equipped.0.as_deref();
+    let tool_name = equipped.0.as_deref();
 
-    // Find closest interactable in range with matching tool
-    let mut closest: Option<Entity> = None;
-    let mut closest_dist = f32::MAX;
+    match tool_name {
+        // Gun equipped → hitscan shoot
+        Some(name) if name.contains("AK") || name.contains("ak") || name.contains("gun") => {
+            let current = time.elapsed_secs();
+            if current - *last_shot < SHOOT_COOLDOWN {
+                return;
+            }
+            *last_shot = current;
 
-    for (entity, pos, interactable) in interactables_query.iter() {
-        let dist = player_pos.0.distance(pos.0);
-        if dist <= interactable.interaction_distance && dist < closest_dist {
-            let tool_matches = interactable.required_tool.is_none()
-                || interactable.required_tool.as_deref() == equipped_tool;
-            if tool_matches {
-                closest_dist = dist;
-                closest = Some(entity);
+            let eye_pos = player_pos.0 + Vec3::Y * 0.8;
+            let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
+            let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
+
+            if let Some(hit) = spatial_query.cast_ray(
+                eye_pos,
+                Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
+                SHOOT_RANGE,
+                true,
+                &filter,
+            ) {
+                if !is_predicted {
+                    if let Ok((_entity, mut health, _pos)) = health_query.get_mut(hit.entity) {
+                        health.0 -= SHOOT_DAMAGE;
+                        info!("Hit player for {} damage! Health: {}", SHOOT_DAMAGE, health.0);
+                    }
+                }
             }
         }
-    }
 
-    let Some(target) = closest else {
-        return;
-    };
+        // Tool equipped → mine nearby interactable
+        Some(_tool) => {
+            let current_secs = time.elapsed_secs();
 
-    let Ok((_, pos, mut interactable)) = interactables_query.get_mut(target) else {
-        return;
-    };
+            let mut closest: Option<Entity> = None;
+            let mut closest_dist = f32::MAX;
 
-    // Detect interruption: if last mine was more than 2 frames ago, reset
-    if let Some(last) = interactable.last_mine_secs {
-        // ~3 frame-times at 64Hz ≈ 0.05s tolerance
-        if current_secs - last > 0.05 {
-            interactable.mine_start_secs = None;
+            for (entity, pos, interactable) in interactables_query.iter() {
+                let dist = player_pos.0.distance(pos.0);
+                if dist <= interactable.interaction_distance && dist < closest_dist {
+                    let tool_matches = interactable.required_tool.is_none()
+                        || interactable.required_tool.as_deref() == tool_name;
+                    if tool_matches {
+                        closest_dist = dist;
+                        closest = Some(entity);
+                    }
+                }
+            }
+
+            let Some(target) = closest else { return; };
+            let Ok((_, pos, mut interactable)) = interactables_query.get_mut(target) else { return; };
+
+            if let Some(last) = interactable.last_mine_secs {
+                if current_secs - last > 0.05 {
+                    interactable.mine_start_secs = None;
+                }
+            }
+            interactable.last_mine_secs = Some(current_secs);
+
+            if interactable.mine_start_secs.is_none() {
+                interactable.mine_start_secs = Some(current_secs);
+                info!("Started mining");
+            }
+
+            let progress = interactable.progress(current_secs);
+            if progress >= interactable.interaction_time {
+                info!("Mining complete!");
+                if !is_predicted {
+                    let spawn_pos = pos.0;
+                    commands.entity(target).despawn();
+                    commands.spawn((
+                        Position(spawn_pos + Vec3::new(0.0, 0.3, 0.0)),
+                        Rotation::default(),
+                        RigidBody::Dynamic,
+                        Collider::cuboid(0.2, 0.2, 0.2),
+                        Equippable {
+                            name: "Ore Chunk".to_string(),
+                            model_path: "ore_chunk.glb".to_string(),
+                            interaction_distance: 2.0,
+                            scale: 0.5,
+                        },
+                        Name::new("Ore Chunk"),
+                        Replicate::to_clients(NetworkTarget::All),
+                    ));
+                }
+            }
         }
-    }
-    interactable.last_mine_secs = Some(current_secs);
 
-    // Start mining if not already started
-    if interactable.mine_start_secs.is_none() {
-        interactable.mine_start_secs = Some(current_secs);
-        info!("Started mining");
-    }
-
-    // Check completion — pure function of start time vs current time
-    let progress = interactable.progress(current_secs);
-    if progress >= interactable.interaction_time {
-        info!("Mining complete!");
-
-        // Only server despawns and spawns replicated ore chunk
-        if !is_predicted {
-            let spawn_pos = pos.0;
-            commands.entity(target).despawn();
-
-            // Spawn replicated ore chunk at the mined location
-            commands.spawn((
-                Position(spawn_pos + Vec3::new(0.0, 0.3, 0.0)),
-                Rotation::default(),
-                RigidBody::Dynamic,
-                Collider::cuboid(0.2, 0.2, 0.2),
-                Equippable {
-                    name: "Ore Chunk".to_string(),
-                    model_path: "ore_chunk.glb".to_string(),
-                    interaction_distance: 2.0,
-                    scale: 0.5,
-                },
-                Name::new("Ore Chunk"),
-                Replicate::to_clients(NetworkTarget::All),
-            ));
-        }
+        // Nothing equipped → no action
+        None => {}
     }
 }
+
+const SHOOT_DAMAGE: i32 = 25;
+const SHOOT_RANGE: f32 = 500.0;
+const SHOOT_COOLDOWN: f32 = 0.15;
 
 /// Shared system: resets mining state on interactables that haven't been mined recently.
 /// Runs every FixedUpdate. If `last_mine_secs` is stale (>0.05s ago), clears mining state.
@@ -902,9 +932,9 @@ pub fn update_view_model(
     let view_model = commands
         .spawn((
             SceneRoot(model_handle),
-            Transform::from_xyz(0.4, -0.3, -0.5)
-                .with_scale(Vec3::splat(0.5))
-                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+            Transform::from_xyz(0.2, -0.15, -0.4)
+                .with_scale(Vec3::splat(1.0))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             EquippedItem {
                 name: tool_name.clone(),

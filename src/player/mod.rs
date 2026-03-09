@@ -8,7 +8,7 @@ use bevy::{
 };
 use bevy_enhanced_input::prelude::*;
 
-use crate::protocol::{CharacterVelocity, JumpAction, MoveAction, PlayerContext, PlayerEquipped, PlayerPitch};
+use crate::protocol::{CharacterVelocity, JumpAction, MoveAction, PlayerContext, PlayerEquipped, PlayerHealth, PlayerPitch};
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
 pub const JUMP_SPEED: f32 = 10.0;
@@ -80,6 +80,7 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
         crate::protocol::PlayerYaw::default(),
         PlayerPitch::default(),
         PlayerEquipped::default(),
+        PlayerHealth::default(),
         CharacterVelocity::default(),
         Position(PLAYER_SPAWN_POS),
         Rotation::default(),
