@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use lightyear::avian3d::plugin::AvianReplicationMode;
 use lightyear::avian3d::prelude::*;
 
+pub mod auth;
 pub mod player;
 pub mod protocol;
 pub mod world;
@@ -49,17 +50,22 @@ impl Plugin for SharedPlugin {
         // Kinematic character controller: gravity, ground detection, move-and-slide.
         app.add_systems(FixedUpdate, player::character_controller);
 
+        // Sync PlayerYaw+PlayerPitch → Rotation for all players. Runs on both client (prediction)
+        // and server (authority). Lightyear's Avian plugin syncs Rotation → Transform for rendering.
+        app.add_systems(FixedUpdate, player::sync_rotation_from_yaw);
+
         // Reset stale mining state (detects when player stops holding mine button)
         app.add_systems(FixedUpdate, world::reset_stale_mining);
 
         // Shared observers (fire on both client predicted + server authoritative via BEI replay)
+        app.add_observer(player::shared_look);
         app.add_observer(player::shared_movement);
         app.add_observer(player::shared_jump);
         app.add_observer(world::shared_door_interact);
         app.add_observer(world::shared_equip_interact);
+        app.add_observer(world::shared_drop);
+        app.add_observer(world::shared_jab);
         app.add_observer(world::shared_primary_action);
 
-        // Diagnostic logging
-        app.add_systems(Update, player::log_player_state);
     }
 }

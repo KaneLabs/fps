@@ -8,7 +8,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::player::VIEW_MODEL_RENDER_LAYER;
-use crate::protocol::{InteractAction, PrimaryAction, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
+use crate::protocol::{DropAction, InteractAction, JabAction, PrimaryAction, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -23,12 +23,219 @@ pub struct Equippable {
     pub model_path: String,
     pub interaction_distance: f32,
     pub scale: f32,
+    /// Muzzle offset in camera-local space (where the barrel tip is).
+    /// For guns this is where tracers originate. None for non-guns.
+    pub muzzle_offset: Option<[f32; 3]>,
 }
 
 /// Component for the currently equipped view model (client-only).
 #[derive(Component)]
 pub struct EquippedItem {
     pub name: String,
+}
+
+/// Marker for bullet tracer meshes — despawns after a short lifetime.
+#[derive(Component)]
+pub struct BulletTracer {
+    pub spawn_time: f32,
+    pub lifetime: f32,
+}
+
+/// Event fired when a shot happens — client uses this to spawn visual tracer.
+#[derive(Event)]
+pub struct ShotFired {
+    pub muzzle: Vec3,
+    pub hit_point: Vec3,
+}
+
+/// Client-only observer: spawns a red tracer mesh when a shot is fired.
+pub fn spawn_tracer(
+    trigger: On<ShotFired>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
+) {
+    let shot = trigger.event();
+    let diff = shot.hit_point - shot.muzzle;
+    let length = diff.length();
+    let dir = diff / length;
+    let midpoint = shot.muzzle + dir * (length / 2.0);
+
+    // Cylinder extends along local Y — rotate so Y aligns with shot direction
+    let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+
+    commands.spawn((
+        Mesh3d(meshes.add(Cylinder::new(0.01, length))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.1, 0.1),
+            emissive: bevy::color::LinearRgba::new(5.0, 0.2, 0.2, 1.0),
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_translation(midpoint).with_rotation(rotation),
+        BulletTracer {
+            spawn_time: time.elapsed_secs(),
+            lifetime: 0.08,
+        },
+    ));
+}
+
+/// Client-only: despawns tracers after their lifetime expires.
+pub fn cleanup_tracers(
+    query: Query<(Entity, &BulletTracer)>,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs();
+    for (entity, tracer) in query.iter() {
+        if now - tracer.spawn_time > tracer.lifetime {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+// ========================================
+// Jab (melee) system
+// ========================================
+
+const JAB_DAMAGE: i32 = 15;
+const JAB_RANGE: f32 = 2.5;
+const JAB_COOLDOWN: f32 = 0.4;
+const JAB_DURATION: f32 = 0.3;
+
+/// Marker for the left hand mesh used for jab animation.
+#[derive(Component)]
+pub struct LeftHand;
+
+/// Tracks the jab animation state. Added to the LeftHand entity when jabbing.
+#[derive(Component)]
+pub struct JabAnimation {
+    pub start_time: f32,
+}
+
+/// Shared observer: jab melee attack — short range punch, server applies damage.
+pub fn shared_jab(
+    trigger: On<Fire<JabAction>>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, Has<Predicted>)>,
+    mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
+    spatial_query: SpatialQuery,
+    mut commands: Commands,
+    mut last_jab: Local<f32>,
+    time: Res<Time>,
+) {
+    let Ok((player_pos, yaw, pitch, is_predicted)) = player_query.get(trigger.context) else {
+        return;
+    };
+
+    let current = time.elapsed_secs();
+    if current - *last_jab < JAB_COOLDOWN {
+        return;
+    }
+    *last_jab = current;
+
+    let eye_pos = player_pos.0 + Vec3::Y * 0.8;
+    let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
+    let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
+
+    info!(
+        "[JAB] Punch! pos={:?} dir={:?} predicted={}",
+        eye_pos, ray_dir, is_predicted
+    );
+
+    if let Some(hit) = spatial_query.cast_ray(
+        eye_pos,
+        Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
+        JAB_RANGE,
+        true,
+        &filter,
+    ) {
+        info!("[JAB] Hit entity {:?} at distance {:.1}", hit.entity, hit.distance);
+        if !is_predicted {
+            if let Ok((_entity, mut health, _pos)) = health_query.get_mut(hit.entity) {
+                health.0 -= JAB_DAMAGE;
+                info!("[JAB] {} damage applied, health now: {}", JAB_DAMAGE, health.0);
+            } else {
+                info!("[JAB] Hit entity {:?} but it has no PlayerHealth", hit.entity);
+            }
+        }
+    } else {
+        info!("[JAB] Miss — no hit within range {}", JAB_RANGE);
+    }
+
+    // Trigger animation event (client picks this up)
+    commands.trigger(JabFired);
+}
+
+/// Event for client-side jab animation.
+#[derive(Event)]
+pub struct JabFired;
+
+/// Client-only observer: starts the jab animation on the left hand.
+pub fn start_jab_animation(
+    _trigger: On<JabFired>,
+    hand_query: Query<Entity, With<LeftHand>>,
+    mut commands: Commands,
+    time: Res<Time>,
+) {
+    let Ok(hand) = hand_query.single() else { return; };
+    // Insert/overwrite animation component to restart
+    commands.entity(hand).insert(JabAnimation {
+        start_time: time.elapsed_secs(),
+    });
+}
+
+/// Client-only: animates the left hand during a jab.
+/// Slides in from off-screen left, punches forward, retracts.
+pub fn animate_jab(
+    mut hand_query: Query<(&mut Transform, &JabAnimation, Entity), With<LeftHand>>,
+    time: Res<Time>,
+    mut commands: Commands,
+) {
+    let Ok((mut transform, anim, entity)) = hand_query.single_mut() else { return; };
+
+    let elapsed = time.elapsed_secs() - anim.start_time;
+    let t = (elapsed / JAB_DURATION).clamp(0.0, 1.0);
+
+    if t >= 1.0 {
+        // Animation done — return to rest position (off-screen)
+        transform.translation = Vec3::new(-0.8, -0.3, -0.2);
+        commands.entity(entity).remove::<JabAnimation>();
+        return;
+    }
+
+    // Three-phase animation using smoothstep:
+    // 0.0–0.3: slide in from left
+    // 0.3–0.6: punch forward
+    // 0.6–1.0: retract back out
+    let (x, y, z) = if t < 0.3 {
+        // Slide in: (-0.8, -0.3, -0.2) → (-0.25, -0.15, -0.3)
+        let p = smoothstep(t / 0.3);
+        lerp3((-0.8, -0.3, -0.2), (-0.25, -0.15, -0.3), p)
+    } else if t < 0.6 {
+        // Punch forward: (-0.25, -0.15, -0.3) → (-0.15, -0.1, -0.7)
+        let p = smoothstep((t - 0.3) / 0.3);
+        lerp3((-0.25, -0.15, -0.3), (-0.15, -0.1, -0.7), p)
+    } else {
+        // Retract: (-0.15, -0.1, -0.7) → (-0.8, -0.3, -0.2)
+        let p = smoothstep((t - 0.6) / 0.4);
+        lerp3((-0.15, -0.1, -0.7), (-0.8, -0.3, -0.2), p)
+    };
+
+    transform.translation = Vec3::new(x, y, z);
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp3(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
+    (
+        a.0 + (b.0 - a.0) * t,
+        a.1 + (b.1 - a.1) * t,
+        a.2 + (b.2 - a.2) * t,
+    )
 }
 
 /// Component for objects that can be interacted with using tools.
@@ -413,6 +620,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             model_path: "dirty-pickaxe.glb".to_string(),
             interaction_distance: 2.0,
             scale: 1.8,
+            muzzle_offset: None,
         },
         Name::new("Pickaxe"),
         Replicate::to_clients(NetworkTarget::All),
@@ -430,6 +638,9 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             model_path: "ak47.glb".to_string(),
             interaction_distance: 2.0,
             scale: 1.8,
+            // Muzzle tip in camera-local space: gun at (0.2, -0.15, -0.4),
+            // barrel extends ~0.5 along -Z at scale 1.0
+            muzzle_offset: Some([0.2, -0.1, -0.9]),
         },
         Name::new("AK47"),
         Replicate::to_clients(NetworkTarget::All),
@@ -613,7 +824,7 @@ pub struct RemoteEquippedItem;
 pub fn sync_remote_equipped(
     changed_query: Query<
         (Entity, &PlayerEquipped),
-        (Changed<PlayerEquipped>, Without<crate::player::LocalPlayer>),
+        (Changed<PlayerEquipped>, Without<lightyear::prelude::Controlled>),
     >,
     children_query: Query<&Children>,
     remote_item_query: Query<Entity, With<RemoteEquippedItem>>,
@@ -656,18 +867,6 @@ pub fn sync_remote_equipped(
     }
 }
 
-/// Client-only: rotates remote player capsules based on their replicated yaw and pitch.
-pub fn sync_remote_orientation(
-    mut query: Query<
-        (&PlayerYaw, &PlayerPitch, &mut Transform),
-        (Without<crate::player::LocalPlayer>, With<crate::player::Player>),
-    >,
-) {
-    for (yaw, pitch, mut transform) in query.iter_mut() {
-        // Yaw rotates the whole body, pitch tilts it forward/back
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0 * 0.5, 0.0);
-    }
-}
 
 // ========================================
 // Shared observers — run on both client + server via BEI input replay
@@ -701,19 +900,16 @@ pub fn shared_door_interact(
     }
 }
 
-/// Shared observer: equip/unequip items when player presses E within range.
-/// Idempotent: if already holding the nearby item, do nothing.
-/// On drop: moves the world entity Position to the player's location (replicates).
+/// Shared observer: equip items when player presses E within range.
 pub fn shared_equip_interact(
     trigger: On<Fire<InteractAction>>,
     mut player_query: Query<(&Position, &mut PlayerEquipped)>,
-    mut equippable_query: Query<(Entity, &mut Position, &Equippable), Without<PlayerEquipped>>,
+    equippable_query: Query<(Entity, &Position, &Equippable), Without<PlayerEquipped>>,
 ) {
     let Ok((player_pos, mut equipped)) = player_query.get_mut(trigger.context) else {
         return;
     };
 
-    // Find closest equippable item within range
     let mut closest: Option<(Entity, f32, String)> = None;
     for (entity, eq_pos, equippable) in equippable_query.iter() {
         let dist = player_pos.0.distance(eq_pos.0);
@@ -725,24 +921,33 @@ pub fn shared_equip_interact(
     }
 
     if let Some((_, _, name)) = closest {
-        // Already holding this item — do nothing (idempotent)
         if equipped.0.as_ref() == Some(&name) {
             return;
         }
         info!("Equipped {}", name);
         equipped.0 = Some(name);
-    } else if equipped.0.is_some() {
-        // No item nearby — drop what we're holding
-        let dropped_name = equipped.0.as_ref().unwrap().clone();
-        info!("Dropped {}", dropped_name);
-        equipped.0 = None;
+    }
+}
 
-        // Move the dropped item to player position (Position replicates to all clients)
-        for (_, mut eq_pos, equippable) in equippable_query.iter_mut() {
-            if equippable.name == dropped_name {
-                eq_pos.0 = player_pos.0 + Vec3::new(0.0, -0.5, 0.0);
-                break;
-            }
+/// Shared observer: drop equipped item when player presses G.
+pub fn shared_drop(
+    trigger: On<Fire<DropAction>>,
+    mut player_query: Query<(&Position, &mut PlayerEquipped)>,
+    mut equippable_query: Query<(Entity, &mut Position, &Equippable), Without<PlayerEquipped>>,
+) {
+    let Ok((player_pos, mut equipped)) = player_query.get_mut(trigger.context) else {
+        return;
+    };
+
+    let Some(dropped_name) = equipped.0.take() else {
+        return;
+    };
+    info!("Dropped {}", dropped_name);
+
+    for (_, mut eq_pos, equippable) in equippable_query.iter_mut() {
+        if equippable.name == dropped_name {
+            eq_pos.0 = player_pos.0 + Vec3::new(0.0, -0.5, 0.0);
+            break;
         }
     }
 }
@@ -757,7 +962,8 @@ pub fn shared_primary_action(
     trigger: On<Fire<PrimaryAction>>,
     player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, Has<Predicted>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
-    mut health_query: Query<(Entity, &mut PlayerHealth, &Position), Without<PlayerEquipped>>,
+    mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
+    equippable_query: Query<&Equippable>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_shot: Local<f32>,
@@ -782,6 +988,23 @@ pub fn shared_primary_action(
             let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
             let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
 
+            info!(
+                "[SHOOT] Fire! pos={:?} yaw={:.2} pitch={:.2} dir={:?} predicted={}",
+                eye_pos, yaw.0, pitch.0, ray_dir, is_predicted
+            );
+
+            // Log all players with colliders for debugging hit detection
+            if !is_predicted {
+                for (e, hp, pos) in health_query.iter() {
+                    info!(
+                        "[SHOOT] Potential target: {:?} pos={:?} hp={} dist={:.1}",
+                        e, pos.0, hp.0, eye_pos.distance(pos.0)
+                    );
+                }
+            }
+
+            let tracer_dist;
+
             if let Some(hit) = spatial_query.cast_ray(
                 eye_pos,
                 Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
@@ -789,13 +1012,43 @@ pub fn shared_primary_action(
                 true,
                 &filter,
             ) {
+                tracer_dist = hit.distance;
+                info!(
+                    "[SHOOT] Ray hit entity {:?} at distance {:.1}",
+                    hit.entity, hit.distance
+                );
                 if !is_predicted {
                     if let Ok((_entity, mut health, _pos)) = health_query.get_mut(hit.entity) {
                         health.0 -= SHOOT_DAMAGE;
-                        info!("Hit player for {} damage! Health: {}", SHOOT_DAMAGE, health.0);
+                        info!(
+                            "[SHOOT] Player hit! {} damage applied, health now: {}",
+                            SHOOT_DAMAGE, health.0
+                        );
+                    } else {
+                        info!("[SHOOT] Hit entity {:?} but it has no PlayerHealth", hit.entity);
                     }
                 }
+            } else {
+                tracer_dist = SHOOT_RANGE;
+                info!("[SHOOT] Miss — no ray hit within {} range", SHOOT_RANGE);
             }
+
+            // Look up muzzle offset from the Equippable component
+            let muzzle_local = equippable_query
+                .iter()
+                .find(|e| e.name == *name)
+                .and_then(|e| e.muzzle_offset)
+                .map(|o| Vec3::from_array(o))
+                .unwrap_or(Vec3::new(0.2, -0.1, -0.9));
+
+            let cam_rot = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);
+            let muzzle_world = eye_pos + cam_rot * muzzle_local;
+            let hit_point = eye_pos + ray_dir * tracer_dist;
+
+            commands.trigger(ShotFired {
+                muzzle: muzzle_world,
+                hit_point,
+            });
         }
 
         // Tool equipped → mine nearby interactable
@@ -848,6 +1101,7 @@ pub fn shared_primary_action(
                             model_path: "ore_chunk.glb".to_string(),
                             interaction_distance: 2.0,
                             scale: 0.5,
+                            muzzle_offset: None,
                         },
                         Name::new("Ore Chunk"),
                         Replicate::to_clients(NetworkTarget::All),
@@ -888,7 +1142,7 @@ pub fn reset_stale_mining(
 
 /// Client-only: spawns/despawns the FPS view model when PlayerEquipped changes.
 pub fn update_view_model(
-    player_query: Query<(&PlayerEquipped, &Children), With<crate::player::LocalPlayer>>,
+    player_query: Query<(&PlayerEquipped, &Children), With<lightyear::prelude::Controlled>>,
     camera_query: Query<Entity, With<WorldModelCamera>>,
     view_model_query: Query<Entity, With<EquippedItem>>,
     equippable_query: Query<&Equippable>,
@@ -934,7 +1188,10 @@ pub fn update_view_model(
             SceneRoot(model_handle),
             Transform::from_xyz(0.2, -0.15, -0.4)
                 .with_scale(Vec3::splat(1.0))
-                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                .with_rotation(
+                    Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                        * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                ),
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             EquippedItem {
                 name: tool_name.clone(),

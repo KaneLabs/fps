@@ -1,4 +1,5 @@
 use avian3d::prelude::*;
+use bevy::math::VectorSpace;
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::*;
 use lightyear::prelude::input::bei::InputPlugin;
@@ -13,11 +14,44 @@ use serde::{Deserialize, Serialize};
 pub struct PlayerId(pub u64);
 
 /// The player's camera yaw, replicated so the server can compute camera-relative movement.
-#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct PlayerYaw(pub f32);
 
+// VectorSpace impls for PlayerYaw/PlayerPitch so lightyear can interpolate them on remote clients.
+macro_rules! impl_vector_space_f32 {
+    ($T:ident) => {
+        impl std::ops::Add for $T {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+        }
+        impl std::ops::Sub for $T {
+            type Output = Self;
+            fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+        }
+        impl std::ops::Mul<f32> for $T {
+            type Output = Self;
+            fn mul(self, rhs: f32) -> Self { Self(self.0 * rhs) }
+        }
+        impl std::ops::Div<f32> for $T {
+            type Output = Self;
+            fn div(self, rhs: f32) -> Self { Self(self.0 / rhs) }
+        }
+        impl std::ops::Neg for $T {
+            type Output = Self;
+            fn neg(self) -> Self { Self(-self.0) }
+        }
+        impl bevy::math::VectorSpace for $T {
+            type Scalar = f32;
+            const ZERO: Self = Self(0.0);
+        }
+    };
+}
+
+impl_vector_space_f32!(PlayerYaw);
+impl_vector_space_f32!(PlayerPitch);
+
 /// The player's camera pitch, replicated so remote clients can tilt the player model.
-#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct PlayerPitch(pub f32);
 
 /// Player velocity managed by our kinematic character controller.
@@ -49,10 +83,27 @@ pub struct JumpAction;
 #[action_output(bool)]
 pub struct InteractAction;
 
+/// G → drop equipped item
+#[derive(Debug, InputAction)]
+#[action_output(bool)]
+pub struct DropAction;
+
+/// Q → left hand jab (melee)
+#[derive(Debug, InputAction)]
+#[action_output(bool)]
+pub struct JabAction;
+
 /// Left click → primary action (mine, shoot, etc. depending on equipped item)
 #[derive(Debug, InputAction)]
 #[action_output(bool)]
 pub struct PrimaryAction;
+
+/// Mouse motion → look delta (Vec2: x = yaw delta, y = pitch delta).
+/// Replicated to server via lightyear's BEI input system so the server
+/// knows the player's facing direction for hit detection.
+#[derive(Debug, InputAction)]
+#[action_output(Vec2)]
+pub struct LookAction;
 
 /// Tracks which tool a player has equipped. Replicated so the server
 /// can validate mining and other players can see held items.
@@ -85,39 +136,64 @@ impl Plugin for ProtocolPlugin {
         app.register_input_action::<MoveAction>();
         app.register_input_action::<JumpAction>();
         app.register_input_action::<InteractAction>();
+        app.register_input_action::<DropAction>();
+        app.register_input_action::<JabAction>();
         app.register_input_action::<PrimaryAction>();
+        app.register_input_action::<LookAction>();
 
         // Replicated components
         app.register_component::<PlayerId>();
         app.register_component::<PlayerYaw>()
-            .add_prediction();
+            .add_prediction()
+            .add_linear_interpolation();
         app.register_component::<PlayerPitch>()
-            .add_prediction();
+            .add_prediction()
+            .add_linear_interpolation();
         app.register_component::<PlayerEquipped>()
             .add_prediction();
         app.register_component::<PlayerHealth>();
 
-        // Avian3d physics components with prediction + interpolation
-        // Matches lightyear FPS example: enable_correction() lets lightyear handle
-        // smooth corrections on Transform directly (via PositionButInterpolateTransform mode).
+        // Avian3d physics components with prediction + interpolation.
+        // enable_correction() lets lightyear handle smooth corrections on Transform
+        // directly (via PositionButInterpolateTransform mode).
+        // add_should_rollback() prevents unnecessary rollbacks from floating-point noise.
         app.register_component::<Position>()
             .add_prediction()
+            .add_should_rollback(position_should_rollback)
             .add_linear_interpolation()
             .enable_correction();
 
         app.register_component::<Rotation>()
             .add_prediction()
+            .add_should_rollback(rotation_should_rollback)
             .add_linear_interpolation()
             .enable_correction();
 
         // Our kinematic velocity (replaces Avian's LinearVelocity for players)
         app.register_component::<CharacterVelocity>()
-            .add_prediction();
+            .add_prediction()
+            .add_should_rollback(velocity_should_rollback);
 
         // World object components — replicated, server-authoritative (no prediction)
         app.register_component::<crate::world::DoorState>();
         app.register_component::<crate::world::Equippable>();
         app.register_component::<crate::world::Interactable>();
     }
+}
+
+// --- Rollback thresholds ---
+// Prevent unnecessary rollbacks from floating-point noise.
+// Only rollback if the server/client values differ by more than a small threshold.
+
+fn position_should_rollback(this: &Position, that: &Position) -> bool {
+    (this.0 - that.0).length() >= 0.01
+}
+
+fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
+    this.angle_between(*that) >= 0.01
+}
+
+fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
+    (this.0 - that.0).length() >= 0.01
 }
 
