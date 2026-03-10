@@ -18,7 +18,8 @@ use multiplayer::world::{
     spawn_lights, spawn_world_model, update_view_model, WorldModelCamera, DEFAULT_RENDER_LAYER,
     interaction_ui_system, init_replicated_doors, init_replicated_equippables,
     init_replicated_interactables, sync_door_state, sync_equippable_visibility,
-    sync_remote_equipped, sync_remote_orientation,
+    sync_remote_equipped, spawn_tracer, cleanup_tracers,
+    start_jab_animation, animate_jab, LeftHand,
 };
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
 
@@ -65,15 +66,20 @@ struct LineGradient(Handle<Image>);
 struct MenuSelection(usize);
 
 fn main() {
+    // Load or generate persistent Ed25519 keypair (~/.anima/keypair.json)
+    let identity = multiplayer::auth::ClientIdentity::load_or_create();
+    info!("Client identity: {} (id={})", identity.address, identity.client_id);
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "ANIMA".to_string(),
+            title: format!("ANIMA — {}", &identity.address[..8]),
             ..default()
         }),
         ..default()
     }))
     .insert_resource(ClearColor(Color::BLACK));
+    app.insert_resource(identity);
     app.add_plugins(EguiPlugin::default());
     app.add_plugins(AudioPlugin);
     app.add_plugins(ClientPlugins {
@@ -105,14 +111,12 @@ fn main() {
     app.add_systems(
         Update,
         (
-            mouse_look,
-            sync_player_yaw,
+            sync_camera_pitch,
             grab_mouse,
             change_fov,
             update_view_model,
             interaction_ui_system,
             sync_door_state,
-            sync_remote_orientation,
             init_replicated_doors,
             init_replicated_equippables,
             init_replicated_interactables,
@@ -127,15 +131,22 @@ fn main() {
     );
     app.add_systems(
         FixedPreUpdate,
-        pre_rotate_move_input
+        (pre_rotate_move_input, gate_look_on_cursor)
             .after(EnhancedInputSystems::Update)
             .before(lightyear::prelude::client::input::InputSystems::BufferClientInputs)
             .run_if(not(lightyear::prelude::is_in_rollback))
             .run_if(in_state(AppState::InGame)),
     );
 
+    app.add_systems(
+        Update,
+        (cleanup_tracers, animate_jab, health_hud, log_health_changes).run_if(in_state(AppState::InGame)),
+    );
+
     app.add_observer(on_predicted_spawn);
     app.add_observer(on_interpolated_spawn);
+    app.add_observer(spawn_tracer);
+    app.add_observer(start_jab_animation);
     app.run();
 }
 
@@ -693,21 +704,18 @@ fn despawn_menu(
     }
 }
 
-fn connect_to_server(mut commands: Commands) {
+fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
-    let client_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
     let auth = Authentication::Manual {
         server_addr,
-        client_id,
+        client_id: identity.client_id,
         private_key: [0; 32],
         protocol_id: PROTOCOL_ID,
     };
+
+    info!("Connecting as {} (id={})", identity.address, identity.client_id);
 
     let netcode_config = NetcodeConfig {
         client_timeout_secs: 120,
@@ -734,49 +742,118 @@ fn connect_to_server(mut commands: Commands) {
         .id();
 
     commands.trigger(Connect { entity: client_entity });
-    info!("Connecting to server at {} as client {}", server_addr, client_id);
 }
 
 // ========================================
 // Player spawn
 // ========================================
 
-/// Local player: predicted entity owned by this client.
+/// Log health changes for debugging.
+fn log_health_changes(
+    query: Query<(Entity, &PlayerHealth, Has<Controlled>), Changed<PlayerHealth>>,
+) {
+    for (entity, health, is_local) in query.iter() {
+        let tag = if is_local { "LOCAL" } else { "REMOTE" };
+        info!("[HEALTH] {} {:?} health={}", tag, entity, health.0);
+    }
+}
+
+/// HUD: health bar at the bottom-center of the screen.
+fn health_hud(
+    mut contexts: EguiContexts,
+    player_query: Query<&PlayerHealth, With<Controlled>>,
+) {
+    let Ok(health) = player_query.single() else { return; };
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+
+    let screen = ctx.screen_rect();
+    let bar_w = 200.0;
+    let bar_h = 16.0;
+    let bar_x = (screen.width() - bar_w) / 2.0;
+    let bar_y = screen.height() - 50.0;
+
+    egui::Area::new(egui::Id::new("health_hud"))
+        .fixed_pos(egui::pos2(bar_x, bar_y))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let hp = health.0.max(0) as f32;
+            let pct = (hp / 100.0).clamp(0.0, 1.0);
+
+            // Bar color: green → yellow → red as health drops
+            let color = if pct > 0.5 {
+                egui::Color32::from_rgb(50, 200, 80)
+            } else if pct > 0.25 {
+                egui::Color32::from_rgb(220, 180, 30)
+            } else {
+                egui::Color32::from_rgb(220, 40, 40)
+            };
+
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(bar_w, bar_h),
+                egui::Sense::hover(),
+            );
+
+            // Background
+            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160));
+            // Health fill
+            let fill_rect = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(bar_w * pct, bar_h),
+            );
+            ui.painter().rect_filled(fill_rect, 4.0, color);
+            // Border
+            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(80)), egui::StrokeKind::Outside);
+            // Text
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{}", health.0.max(0)),
+                chakra(12.0),
+                egui::Color32::WHITE,
+            );
+        });
+}
+
+/// Predicted entity spawned — fires for our own player (which has Controlled).
+/// Sets up physics for ALL predicted entities; cameras/input only for controlled ones.
 fn on_predicted_spawn(
     trigger: On<Add, (PlayerId, Predicted)>,
-    existing_local: Query<(), With<LocalPlayer>>,
-    query: Query<&PlayerId>,
+    query: Query<(&PlayerId, Has<Controlled>)>,
     position_query: Query<&avian3d::prelude::Position>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let entity = trigger.entity;
-    let Ok(player_id) = query.get(entity) else {
+    let Ok((player_id, is_controlled)) = query.get(entity) else {
         return;
     };
 
-    if existing_local.get(entity).is_ok() {
-        return;
-    }
-    info!("Local player spawned: {:?}", entity);
+    info!("[SPAWN] Predicted player {:?} (id={}) controlled={}", entity, player_id.0, is_controlled);
 
     let spawn_transform = position_query
         .get(entity)
         .map(|p| Transform::from_translation(p.0))
         .unwrap_or(Transform::from_translation(PLAYER_SPAWN_POS));
 
-    let arm = meshes.add(Cuboid::new(0.1, 0.1, 0.5));
-    let arm_material = materials.add(Color::from(tailwind::TEAL_200));
-
+    // All predicted entities get physics + basic components
     commands.entity(entity).insert((
         player_physics_bundle(),
-        LocalPlayer,
-        CameraSensitivity::default(),
         Player { id: player_id.0 },
         spawn_transform,
         Visibility::default(),
     ));
+
+    // Only our controlled entity gets cameras, input bindings, and view model
+    if !is_controlled {
+        return;
+    }
+
+    commands.entity(entity).insert(CameraSensitivity::default());
+
+    let arm = meshes.add(Cuboid::new(0.1, 0.1, 0.5));
+    let arm_material = materials.add(Color::from(tailwind::TEAL_200));
 
     commands.entity(entity).with_children(|parent| {
         parent.spawn((
@@ -800,12 +877,22 @@ fn on_predicted_spawn(
             }),
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
         ));
+        // Right hand (arm)
         parent.spawn((
             Mesh3d(arm),
-            MeshMaterial3d(arm_material),
+            MeshMaterial3d(arm_material.clone()),
             Transform::from_xyz(0.2, -0.1, -0.25),
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
+        ));
+        // Left hand — starts off-screen, animates in on jab
+        parent.spawn((
+            Mesh3d(meshes.add(Cuboid::new(0.12, 0.12, 0.4))),
+            MeshMaterial3d(arm_material),
+            Transform::from_xyz(-0.8, -0.3, -0.2),
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+            NotShadowCaster,
+            LeftHand,
         ));
     });
 
@@ -826,12 +913,28 @@ fn on_predicted_spawn(
     ));
     commands.spawn((
         ActionOf::<PlayerContext>::new(entity),
+        Action::<DropAction>::new(),
+        Bindings::spawn(Spawn(Binding::from(KeyCode::KeyG))),
+    ));
+    commands.spawn((
+        ActionOf::<PlayerContext>::new(entity),
+        Action::<JabAction>::new(),
+        Bindings::spawn(Spawn(Binding::from(KeyCode::KeyQ))),
+    ));
+    commands.spawn((
+        ActionOf::<PlayerContext>::new(entity),
         Action::<PrimaryAction>::new(),
         Bindings::spawn(Spawn(Binding::from(MouseButton::Left))),
+    ));
+    commands.spawn((
+        ActionOf::<PlayerContext>::new(entity),
+        Action::<LookAction>::new(),
+        Bindings::spawn(Spawn(Binding::mouse_motion())),
     ));
 }
 
 /// Remote player: interpolated entity — smooth, slightly delayed, no rubberbanding.
+/// Lightyear never adds Interpolated to our own entity, so no guards needed.
 fn on_interpolated_spawn(
     trigger: On<Add, (PlayerId, Interpolated)>,
     query: Query<&PlayerId>,
@@ -844,7 +947,7 @@ fn on_interpolated_spawn(
         return;
     };
 
-    info!("Remote player spawned (interpolated): {:?} (id={})", entity, player_id.0);
+    info!("[SPAWN] Remote interpolated player spawned: {:?} (id={})", entity, player_id.0);
 
     commands.entity(entity).insert((
         player_physics_bundle(),

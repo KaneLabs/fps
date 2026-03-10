@@ -22,6 +22,10 @@ fn main() {
                 primary_cursor_options: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
                 close_when_requested: false,
+            })
+            .set(bevy::log::LogPlugin {
+                filter: "bevy_enhanced_input::action::fns=error".into(),
+                ..default()
             }),
     );
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(

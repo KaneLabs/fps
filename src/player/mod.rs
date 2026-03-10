@@ -8,7 +8,10 @@ use bevy::{
 };
 use bevy_enhanced_input::prelude::*;
 
-use crate::protocol::{CharacterVelocity, JumpAction, MoveAction, PlayerContext, PlayerEquipped, PlayerHealth, PlayerPitch};
+use avian3d::prelude::Rotation;
+use lightyear::prelude::Controlled;
+
+use crate::protocol::{CharacterVelocity, JumpAction, LookAction, MoveAction, PlayerContext, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
 pub const JUMP_SPEED: f32 = 10.0;
@@ -54,9 +57,6 @@ impl Default for CursorState {
     }
 }
 
-/// Marker for the local (predicted) player entity
-#[derive(Component)]
-pub struct LocalPlayer;
 
 // --- Shared Bundles ---
 // These ensure server and client have identical physics/gameplay components.
@@ -340,25 +340,55 @@ pub fn log_player_state(
     }
 }
 
+// --- Shared Systems ---
+
+/// Shared observer: applies mouse look deltas to PlayerYaw/PlayerPitch.
+/// Runs on both client (prediction) and server (authority) via BEI input replication.
+/// This is how yaw/pitch reach the server — through the input system, not component replication.
+pub fn shared_look(
+    trigger: On<Fire<LookAction>>,
+    mut query: Query<(&mut PlayerYaw, &mut PlayerPitch)>,
+) {
+    let delta = trigger.value;
+    if delta == Vec2::ZERO {
+        return;
+    }
+
+    let Ok((mut yaw, mut pitch)) = query.get_mut(trigger.context) else {
+        return;
+    };
+
+    yaw.0 += -delta.x * 0.003;
+    const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+    pitch.0 = (pitch.0 + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+}
+
+/// Shared system: syncs PlayerYaw + PlayerPitch → Rotation so lightyear replicates
+/// both facing direction and pitch tilt. Runs in FixedUpdate on both client and server.
+/// Remote players display correct pitch tilt via the replicated Rotation.
+pub fn sync_rotation_from_yaw(
+    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), With<PlayerContext>>,
+) {
+    for (yaw, pitch, mut rot) in query.iter_mut() {
+        rot.0 = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);
+    }
+}
+
 // --- Client-Only Systems ---
 
 /// Pre-rotate MoveAction's raw WASD Vec2 by camera yaw so the value sent to the
 /// server is already in world-space. Runs between BEI Update and BufferClientInputs.
 pub fn pre_rotate_move_input(
-    player_query: Query<(&Children, Entity), With<LocalPlayer>>,
-    camera_query: Query<&Transform, With<crate::world::WorldModelCamera>>,
+    player_query: Query<&PlayerYaw, With<Controlled>>,
     mut action_query: Query<
         (&ActionOf<crate::protocol::PlayerContext>, &mut ActionValue),
         With<Action<MoveAction>>,
     >,
 ) {
-    let Ok((children, _player_entity)) = player_query.single() else {
+    let Ok(player_yaw) = player_query.single() else {
         return;
     };
-    let Some(cam_transform) = children.iter().find_map(|c| camera_query.get(c).ok()) else {
-        return;
-    };
-    let (yaw, _, _) = cam_transform.rotation.to_euler(EulerRot::YXZ);
+    let yaw = player_yaw.0;
 
     for (_action_of, mut value) in action_query.iter_mut() {
         if let ActionValue::Axis2D(v) = *value {
@@ -373,55 +403,35 @@ pub fn pre_rotate_move_input(
     }
 }
 
-/// Sync camera yaw and pitch to replicated components so the server and other clients
-/// know our facing direction.
-pub fn sync_player_yaw(
-    player_query: Query<(&Children, Entity), With<LocalPlayer>>,
-    camera_query: Query<&Transform, With<crate::world::WorldModelCamera>>,
-    mut yaw_query: Query<(&mut crate::protocol::PlayerYaw, &mut PlayerPitch)>,
+/// Client-only: zeros LookAction when cursor is unlocked (e.g. Escape pressed).
+/// Prevents mouse deltas from being sent to the server when the player isn't in control.
+/// Runs in FixedPreUpdate between BEI Update and BufferClientInputs.
+pub fn gate_look_on_cursor(
+    cursor_state: Res<CursorState>,
+    mut action_query: Query<&mut ActionValue, With<Action<crate::protocol::LookAction>>>,
 ) {
-    let Ok((children, entity)) = player_query.single() else {
+    if cursor_state.locked {
         return;
-    };
-    let Some(cam_transform) = children.iter().find_map(|c| camera_query.get(c).ok()) else {
-        return;
-    };
-    let (yaw, pitch, _) = cam_transform.rotation.to_euler(EulerRot::YXZ);
-    if let Ok((mut player_yaw, mut player_pitch)) = yaw_query.get_mut(entity) {
-        player_yaw.0 = yaw;
-        player_pitch.0 = pitch;
+    }
+    for mut value in action_query.iter_mut() {
+        *value = ActionValue::Axis2D(Vec2::ZERO);
     }
 }
 
-/// Mouse look: rotates the camera child entity (pitch + yaw). Visual only.
-pub fn mouse_look(
-    accumulated_mouse_motion: Res<AccumulatedMouseMotion>,
-    player_query: Query<&Children, With<LocalPlayer>>,
+/// Client-only: ensures the camera child has identity rotation.
+/// The parent's Rotation now includes both yaw and pitch (via sync_rotation_from_yaw),
+/// so the camera child inherits the correct orientation automatically.
+pub fn sync_camera_pitch(
+    player_query: Query<&Children, With<Controlled>>,
     mut camera_query: Query<&mut Transform, With<crate::world::WorldModelCamera>>,
-    cursor_state: Res<CursorState>,
 ) {
-    if !cursor_state.locked {
-        return;
-    }
-
-    let delta = accumulated_mouse_motion.delta;
-    if delta == Vec2::ZERO {
-        return;
-    }
-
     let Ok(children) = player_query.single() else {
         return;
     };
 
     for child in children.iter() {
         if let Ok(mut cam_transform) = camera_query.get_mut(child) {
-            let (mut yaw, mut pitch, _roll) = cam_transform.rotation.to_euler(EulerRot::YXZ);
-
-            yaw += -delta.x * 0.003;
-            const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-            pitch = (pitch + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-
-            cam_transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+            cam_transform.rotation = Quat::IDENTITY;
         }
     }
 }
