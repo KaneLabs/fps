@@ -14,7 +14,10 @@ Rust, Bevy 0.18, Lightyear 0.26, Avian3d 0.5, bevy-enhanced-input 0.22, bevy_egu
 ## Critical Rules
 
 ### Interactables
-Read `docs/INTERACTABLES.md` before adding any interactable object to the world. Key rule: **if it has a Collider, the server must know about it. If it changes, the server must change it.** Client-only physics changes cause rubberbanding.
+See `.claude/INTERACTABLES.md` (auto-loaded). Key rule: **if it has a Collider, the server must know about it. If it changes, the server must change it.**
+
+### Interpolation vs Prediction
+See `.claude/INTERPOLATION.md` (auto-loaded). Key rule: **interpolated (remote) entities must never run local physics.** Gate shared systems with `Without<Interpolated>`.
 
 ### Shared Bundles
 Use `player_physics_bundle()` and `player_replicated_bundle()` from `player/mod.rs` when spawning player entities. Never duplicate physics components between server and client.

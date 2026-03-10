@@ -71,7 +71,10 @@ fn main() {
     info!("Client identity: {} (id={})", identity.address, identity.client_id);
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    app.add_plugins(DefaultPlugins.set(bevy::log::LogPlugin {
+        filter: "bevy_enhanced_input::action::fns=error".into(),
+        ..default()
+    }).set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("ANIMA — {}", &identity.address[..8]),
             ..default()
@@ -88,7 +91,6 @@ fn main() {
     app.add_plugins(SharedPlugin);
     app.init_state::<AppState>();
     app.insert_resource(CursorState::default());
-
     // One Camera2d in Startup — persists until InGame
     app.add_systems(Startup, setup);
 
@@ -140,7 +142,8 @@ fn main() {
 
     app.add_systems(
         Update,
-        (cleanup_tracers, animate_jab, health_hud, log_health_changes).run_if(in_state(AppState::InGame)),
+        (cleanup_tracers, animate_jab, health_hud, death_screen, log_health_changes)
+            .run_if(in_state(AppState::InGame)),
     );
 
     app.add_observer(on_predicted_spawn);
@@ -811,6 +814,49 @@ fn health_hud(
                 format!("{}", health.0.max(0)),
                 chakra(12.0),
                 egui::Color32::WHITE,
+            );
+        });
+}
+
+/// Death screen overlay — shown when the controlled player has PlayerDead.
+fn death_screen(
+    mut contexts: EguiContexts,
+    player_query: Query<Has<multiplayer::protocol::PlayerDead>, With<Controlled>>,
+    mut frame_count: Local<u32>,
+) {
+    *frame_count += 1;
+    if *frame_count <= 2 { return; }
+    let Ok(is_dead) = player_query.single() else { return; };
+    if !is_dead { return; }
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+
+    egui::Area::new(egui::Id::new("death_screen"))
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let screen = ui.max_rect();
+            // Dark red overlay
+            ui.painter().rect_filled(
+                screen,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(80, 0, 0, 140),
+            );
+            // "YOU DIED" text
+            ui.painter().text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "YOU DIED",
+                cinzel_black(72.0),
+                egui::Color32::from_rgb(220, 40, 40),
+            );
+            // Respawn hint
+            ui.painter().text(
+                egui::pos2(screen.center().x, screen.center().y + 60.0),
+                egui::Align2::CENTER_CENTER,
+                "Respawning...",
+                chakra(16.0),
+                cream(0.5),
             );
         });
 }

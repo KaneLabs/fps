@@ -9,9 +9,9 @@ use bevy::{
 use bevy_enhanced_input::prelude::*;
 
 use avian3d::prelude::Rotation;
-use lightyear::prelude::Controlled;
+use lightyear::prelude::{Controlled, Interpolated};
 
-use crate::protocol::{CharacterVelocity, JumpAction, LookAction, MoveAction, PlayerContext, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
+use crate::protocol::{CharacterVelocity, JumpAction, LookAction, MoveAction, PlayerContext, PlayerDead, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
 pub const JUMP_SPEED: f32 = 10.0;
@@ -23,7 +23,7 @@ pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 2.0, 0.0);
 
 /// Capsule dimensions (must match Collider in physics bundle)
 const CAPSULE_RADIUS: f32 = 0.5;
-const CAPSULE_HEIGHT: f32 = 0.4;
+const CAPSULE_HEIGHT: f32 = 1.0;
 
 /// Surface normal must have Y > this to count as walkable ground (~45° max slope)
 const MIN_GROUND_NORMAL_Y: f32 = 0.7;
@@ -93,11 +93,12 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
 /// (pre-rotated by camera yaw on the client before BEI buffers it).
 pub fn shared_movement(
     trigger: On<Fire<MoveAction>>,
-    mut query: Query<&mut CharacterVelocity>,
+    mut query: Query<(&mut CharacterVelocity, Has<Interpolated>, Has<PlayerDead>)>,
 ) {
     let input = trigger.value;
 
-    if let Ok(mut vel) = query.get_mut(trigger.context) {
+    if let Ok((mut vel, is_interpolated, is_dead)) = query.get_mut(trigger.context) {
+        if is_interpolated || is_dead { return; }
         if input == Vec2::ZERO {
             vel.0.x = 0.0;
             vel.0.z = 0.0;
@@ -112,7 +113,7 @@ pub fn shared_movement(
 
 /// Zeros XZ velocity every fixed tick. Fire<MoveAction> re-applies if keys are held.
 pub fn clear_xz_velocity(
-    mut query: Query<&mut CharacterVelocity, (With<PlayerContext>, With<Collider>)>,
+    mut query: Query<&mut CharacterVelocity, (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
 ) {
     for mut vel in query.iter_mut() {
         vel.0.x = 0.0;
@@ -125,12 +126,13 @@ pub fn clear_xz_velocity(
 /// relying on deferred commands that may not flush between rollback ticks.
 pub fn shared_jump(
     trigger: On<Fire<JumpAction>>,
-    mut query: Query<(&mut CharacterVelocity, &Position)>,
+    mut query: Query<(&mut CharacterVelocity, &Position, Has<Interpolated>, Has<PlayerDead>)>,
     spatial_query: SpatialQuery,
 ) {
-    let Ok((mut vel, position)) = query.get_mut(trigger.context) else {
+    let Ok((mut vel, position, is_interpolated, is_dead)) = query.get_mut(trigger.context) else {
         return;
     };
+    if is_interpolated || is_dead { return; }
     if vel.0.y > 0.5 {
         return;
     }
@@ -168,9 +170,9 @@ pub fn shared_jump(
 /// Flow: collect (p0) → shape cast (p1) → write back (p2).
 pub fn character_controller(
     mut params: ParamSet<(
-        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
         SpatialQuery,
-        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
     )>,
     time: Res<Time>,
 ) {
@@ -347,16 +349,17 @@ pub fn log_player_state(
 /// This is how yaw/pitch reach the server — through the input system, not component replication.
 pub fn shared_look(
     trigger: On<Fire<LookAction>>,
-    mut query: Query<(&mut PlayerYaw, &mut PlayerPitch)>,
+    mut query: Query<(&mut PlayerYaw, &mut PlayerPitch, Has<Interpolated>, Has<PlayerDead>)>,
 ) {
     let delta = trigger.value;
     if delta == Vec2::ZERO {
         return;
     }
 
-    let Ok((mut yaw, mut pitch)) = query.get_mut(trigger.context) else {
+    let Ok((mut yaw, mut pitch, is_interpolated, is_dead)) = query.get_mut(trigger.context) else {
         return;
     };
+    if is_interpolated || is_dead { return; }
 
     yaw.0 += -delta.x * 0.003;
     const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
@@ -367,7 +370,7 @@ pub fn shared_look(
 /// both facing direction and pitch tilt. Runs in FixedUpdate on both client and server.
 /// Remote players display correct pitch tilt via the replicated Rotation.
 pub fn sync_rotation_from_yaw(
-    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), With<PlayerContext>>,
+    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), (With<PlayerContext>, Without<Interpolated>)>,
 ) {
     for (yaw, pitch, mut rot) in query.iter_mut() {
         rot.0 = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);
