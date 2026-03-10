@@ -120,6 +120,12 @@ impl Default for PlayerHealth {
     }
 }
 
+/// Marker: player is dead. Server-authoritative, replicated.
+/// While dead: input is ignored, player cannot move/shoot/interact.
+/// Removed by server on respawn (after timer + future payment gate).
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct PlayerDead;
+
 // --- Protocol Plugin ---
 
 pub struct ProtocolPlugin;
@@ -152,6 +158,7 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<PlayerEquipped>()
             .add_prediction();
         app.register_component::<PlayerHealth>();
+        app.register_component::<PlayerDead>();
 
         // Avian3d physics components with prediction + interpolation.
         // enable_correction() lets lightyear handle smooth corrections on Transform

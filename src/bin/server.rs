@@ -5,9 +5,15 @@ use bevy::prelude::*;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use multiplayer::player::{player_physics_bundle, player_replicated_bundle};
+use multiplayer::player::{player_physics_bundle, player_replicated_bundle, PLAYER_SPAWN_POS};
+use multiplayer::protocol::{PlayerId, PlayerDead, PlayerHealth};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
+
+use avian3d::prelude::Position;
+
+/// Respawn delay in seconds before a dead player can respawn.
+const RESPAWN_DELAY: f32 = 3.0;
 
 fn main() {
     let mut app = App::new();
@@ -51,6 +57,10 @@ fn main() {
     app.add_systems(Startup, spawn_world_physics);
     app.add_systems(Startup, spawn_server);
     app.add_systems(Startup, spawn_server_interactive_objects);
+
+    // Death and respawn
+    app.init_resource::<PendingRespawns>();
+    app.add_systems(FixedUpdate, (check_player_death, process_respawns));
 
     // Client handling
     app.add_observer(handle_new_client);
@@ -143,4 +153,79 @@ fn handle_connected(
             lifetime: Default::default(),
         },
     ));
+}
+
+// ========================================
+// Death & Respawn
+// ========================================
+
+/// Tracks when each dead player becomes eligible for respawn.
+#[derive(Resource, Default)]
+struct PendingRespawns {
+    /// Maps player entity -> time when respawn is allowed.
+    timers: Vec<(Entity, f32)>,
+}
+
+/// Server-only: when health drops to 0, mark the player as dead.
+/// Only runs when PlayerHealth changes (event-driven via Changed<>).
+fn check_player_death(
+    query: Query<(Entity, &PlayerHealth, &PlayerId), (Changed<PlayerHealth>, Without<PlayerDead>)>,
+    mut commands: Commands,
+    mut pending: ResMut<PendingRespawns>,
+    time: Res<Time>,
+) {
+    for (entity, health, player_id) in query.iter() {
+        if health.0 > 0 {
+            continue;
+        }
+
+        info!(
+            "[DEATH] Player {:?} (id={}) died! Respawn in {}s",
+            entity, player_id.0, RESPAWN_DELAY
+        );
+
+        // Mark as dead — replicates to all clients.
+        // Tilt rotation sideways so the body looks fallen.
+        commands.entity(entity).insert(PlayerDead);
+        commands.entity(entity).insert(avian3d::prelude::Rotation(
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        ));
+        pending.timers.push((entity, time.elapsed_secs() + RESPAWN_DELAY));
+    }
+}
+
+/// Server-only: processes respawn timers. Revives players after delay.
+/// This is the hook point for pay-to-respawn (Solana transaction check).
+fn process_respawns(
+    mut pending: ResMut<PendingRespawns>,
+    mut query: Query<(&mut PlayerHealth, &mut Position, &PlayerId), With<PlayerDead>>,
+    mut commands: Commands,
+    time: Res<Time>,
+) {
+    let now = time.elapsed_secs();
+    let mut i = 0;
+    while i < pending.timers.len() {
+        if now >= pending.timers[i].1 {
+            let (entity, _) = pending.timers.remove(i);
+
+            let Ok((mut health, mut position, player_id)) = query.get_mut(entity) else {
+                continue;
+            };
+
+            if authorize_respawn(player_id.0) {
+                info!("[RESPAWN] Player {:?} (id={}) respawning", entity, player_id.0);
+                health.0 = 100;
+                position.0 = PLAYER_SPAWN_POS;
+                commands.entity(entity).remove::<PlayerDead>();
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Respawn authorization gate. Currently always approves.
+/// Future: verify Solana payment, check wallet balance, deduct SOL.
+fn authorize_respawn(_client_id: u64) -> bool {
+    true
 }

@@ -23,6 +23,9 @@ pub struct Equippable {
     pub model_path: String,
     pub interaction_distance: f32,
     pub scale: f32,
+    /// Euler rotation [x, y, z] in radians for the model's native orientation.
+    /// Applied to both FPS view model and third-person remote view.
+    pub model_rotation: [f32; 3],
     /// Muzzle offset in camera-local space (where the barrel tip is).
     /// For guns this is where tracers originate. None for non-guns.
     pub muzzle_offset: Option<[f32; 3]>,
@@ -117,16 +120,17 @@ pub struct JabAnimation {
 /// Shared observer: jab melee attack — short range punch, server applies damage.
 pub fn shared_jab(
     trigger: On<Fire<JabAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, Has<Predicted>)>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, Has<Predicted>, Has<Interpolated>)>,
     mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_jab: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, is_predicted)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
+    if is_interpolated { return; }
 
     let current = time.elapsed_secs();
     if current - *last_jab < JAB_COOLDOWN {
@@ -620,6 +624,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             model_path: "dirty-pickaxe.glb".to_string(),
             interaction_distance: 2.0,
             scale: 1.8,
+            model_rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
             muzzle_offset: None,
         },
         Name::new("Pickaxe"),
@@ -638,6 +643,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             model_path: "ak47.glb".to_string(),
             interaction_distance: 2.0,
             scale: 1.8,
+            model_rotation: [std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2, 0.0],
             // Muzzle tip in camera-local space: gun at (0.2, -0.15, -0.4),
             // barrel extends ~0.5 along -Z at scale 1.0
             muzzle_offset: Some([0.2, -0.1, -0.9]),
@@ -850,6 +856,8 @@ pub fn sync_remote_equipped(
         };
         let model_path = equippable.model_path.clone();
         let scale = equippable.scale;
+        let [rx, ry, rz] = equippable.model_rotation;
+        let model_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
 
         let asset_path = GltfAssetLabel::Scene(0).from_asset(model_path);
         let model = commands
@@ -857,7 +865,7 @@ pub fn sync_remote_equipped(
                 SceneRoot(asset_server.load(asset_path)),
                 Transform::from_xyz(0.3, 0.4, -0.3)
                     .with_scale(Vec3::splat(scale))
-                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
+                    .with_rotation(model_rot),
                 RemoteEquippedItem,
                 RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
             ))
@@ -875,13 +883,14 @@ pub fn sync_remote_equipped(
 /// Shared observer: opens door when player presses E within range.
 pub fn shared_door_interact(
     trigger: On<Fire<InteractAction>>,
-    player_query: Query<(&Position, Has<Predicted>)>,
+    player_query: Query<(&Position, Has<Predicted>, Has<Interpolated>)>,
     mut door_query: Query<(Entity, &Position, &mut DoorState)>,
     mut commands: Commands,
 ) {
-    let Ok((player_pos, is_predicted)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
+    if is_interpolated { return; }
 
     for (entity, door_pos, mut door) in door_query.iter_mut() {
         if door.open {
@@ -903,12 +912,13 @@ pub fn shared_door_interact(
 /// Shared observer: equip items when player presses E within range.
 pub fn shared_equip_interact(
     trigger: On<Fire<InteractAction>>,
-    mut player_query: Query<(&Position, &mut PlayerEquipped)>,
+    mut player_query: Query<(&Position, &mut PlayerEquipped, Has<Interpolated>)>,
     equippable_query: Query<(Entity, &Position, &Equippable), Without<PlayerEquipped>>,
 ) {
-    let Ok((player_pos, mut equipped)) = player_query.get_mut(trigger.context) else {
+    let Ok((player_pos, mut equipped, is_interpolated)) = player_query.get_mut(trigger.context) else {
         return;
     };
+    if is_interpolated { return; }
 
     let mut closest: Option<(Entity, f32, String)> = None;
     for (entity, eq_pos, equippable) in equippable_query.iter() {
@@ -932,12 +942,13 @@ pub fn shared_equip_interact(
 /// Shared observer: drop equipped item when player presses G.
 pub fn shared_drop(
     trigger: On<Fire<DropAction>>,
-    mut player_query: Query<(&Position, &mut PlayerEquipped)>,
+    mut player_query: Query<(&Position, &mut PlayerEquipped, Has<Interpolated>)>,
     mut equippable_query: Query<(Entity, &mut Position, &Equippable), Without<PlayerEquipped>>,
 ) {
-    let Ok((player_pos, mut equipped)) = player_query.get_mut(trigger.context) else {
+    let Ok((player_pos, mut equipped, is_interpolated)) = player_query.get_mut(trigger.context) else {
         return;
     };
+    if is_interpolated { return; }
 
     let Some(dropped_name) = equipped.0.take() else {
         return;
@@ -960,7 +971,7 @@ pub fn shared_drop(
 /// Only the server handles despawn + ore chunk spawn (replicates to all clients).
 pub fn shared_primary_action(
     trigger: On<Fire<PrimaryAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, Has<Predicted>)>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, Has<Predicted>, Has<Interpolated>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
     mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
     equippable_query: Query<&Equippable>,
@@ -969,9 +980,10 @@ pub fn shared_primary_action(
     mut last_shot: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, equipped, is_predicted)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, equipped, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
+    if is_interpolated { return; }
 
     let tool_name = equipped.0.as_deref();
 
@@ -1101,6 +1113,7 @@ pub fn shared_primary_action(
                             model_path: "ore_chunk.glb".to_string(),
                             interaction_distance: 2.0,
                             scale: 0.5,
+                            model_rotation: [0.0, 0.0, 0.0],
                             muzzle_offset: None,
                         },
                         Name::new("Ore Chunk"),
@@ -1170,28 +1183,26 @@ pub fn update_view_model(
         return;
     };
 
-    // Find the Equippable to get its model path
-    let model_path = equippable_query
+    // Find the Equippable to get its model path and rotation
+    let equippable = equippable_query
         .iter()
-        .find(|e| e.name == *tool_name)
-        .map(|e| e.model_path.clone());
+        .find(|e| e.name == *tool_name);
 
-    let Some(model_path) = model_path else {
+    let Some(equippable) = equippable else {
         return;
     };
 
-    let asset_path = GltfAssetLabel::Scene(0).from_asset(model_path);
+    let asset_path = GltfAssetLabel::Scene(0).from_asset(equippable.model_path.clone());
     let model_handle = asset_server.load(asset_path);
+    let [rx, ry, rz] = equippable.model_rotation;
+    let model_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
 
     let view_model = commands
         .spawn((
             SceneRoot(model_handle),
             Transform::from_xyz(0.2, -0.15, -0.4)
                 .with_scale(Vec3::splat(1.0))
-                .with_rotation(
-                    Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
-                        * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                ),
+                .with_rotation(model_rot),
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             EquippedItem {
                 name: tool_name.clone(),
