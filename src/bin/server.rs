@@ -6,14 +6,14 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use multiplayer::player::{player_physics_bundle, player_replicated_bundle, PLAYER_SPAWN_POS};
-use multiplayer::protocol::{PlayerId, PlayerDead, PlayerHealth};
+use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerDead, PlayerHealth, PlayerDisplayId};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
 
 use avian3d::prelude::Position;
 
 /// Respawn delay in seconds before a dead player can respawn.
-const RESPAWN_DELAY: f32 = 3.0;
+const RESPAWN_DELAY: f32 = 20.0;
 
 fn main() {
     let mut app = App::new();
@@ -50,6 +50,9 @@ fn main() {
     app.add_systems(Startup, spawn_world_physics);
     app.add_systems(Startup, spawn_server);
     app.add_systems(Startup, spawn_server_interactive_objects);
+
+    // Player ID counter
+    app.init_resource::<PlayerCounter>();
 
     // Death and respawn
     app.init_resource::<PendingRespawns>();
@@ -101,11 +104,16 @@ fn handle_new_client(trigger: On<Add, LinkOf>, mut commands: Commands) {
     ));
 }
 
+/// Sequential player number counter.
+#[derive(Resource, Default)]
+struct PlayerCounter(u32);
+
 /// When a client connection is confirmed, spawn their player entity.
 fn handle_connected(
     trigger: On<Add, Connected>,
     query: Query<(&RemoteId, Has<ReplicationSender>), With<ClientOf>>,
     mut commands: Commands,
+    mut counter: ResMut<PlayerCounter>,
 ) {
     let entity = trigger.entity;
     let Ok((remote_id, has_sender)) = query.get(entity) else {
@@ -135,9 +143,13 @@ fn handle_connected(
     // CS/Valorant-style replication:
     // - Owning client gets prediction (instant local movement, rollback on mismatch)
     // - All other clients get interpolation (smooth, slightly delayed, no rubberbanding)
+    counter.0 += 1;
+    let display_id = counter.0;
+
     commands.spawn((
         player_replicated_bundle(client_id_bits),
         player_physics_bundle(),
+        PlayerDisplayId(display_id),
         Replicate::to_clients(NetworkTarget::All),
         PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
         InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
@@ -146,6 +158,23 @@ fn handle_connected(
             lifetime: Default::default(),
         },
     ));
+
+    // Force-touch all existing players' Positions so lightyear sends fresh snapshots
+    // to the new client. Without this, interpolated entities need 2 snapshots to render
+    // and a stationary player never generates a second one.
+    commands.queue(ForcePositionUpdate);
+}
+
+/// Command that force-touches all player Positions so lightyear marks them as changed.
+struct ForcePositionUpdate;
+
+impl Command for ForcePositionUpdate {
+    fn apply(self, world: &mut World) {
+        let mut query = world.query_filtered::<&mut Position, With<PlayerId>>();
+        for mut pos in query.iter_mut(world) {
+            pos.set_changed();
+        }
+    }
 }
 
 // ========================================
@@ -162,28 +191,44 @@ struct PendingRespawns {
 /// Server-only: when health drops to 0, mark the player as dead.
 /// Only runs when PlayerHealth changes (event-driven via Changed<>).
 fn check_player_death(
-    query: Query<(Entity, &PlayerHealth, &PlayerId), (Changed<PlayerHealth>, Without<PlayerDead>)>,
+    query: Query<(Entity, &PlayerHealth, &PlayerId, &PlayerDisplayId, &LastDamagedBy), (Changed<PlayerHealth>, Without<PlayerDead>)>,
+    all_players: Query<(&PlayerId, &PlayerDisplayId)>,
     mut commands: Commands,
     mut pending: ResMut<PendingRespawns>,
     time: Res<Time>,
 ) {
-    for (entity, health, player_id) in query.iter() {
+    for (entity, health, player_id, victim_display, last_damaged_by) in query.iter() {
         if health.0 > 0 {
             continue;
         }
 
+        // Look up killer's display ID
+        let killer_display = all_players.iter()
+            .find(|(pid, _)| pid.0 == last_damaged_by.0)
+            .map(|(_, d)| d.0)
+            .unwrap_or(0);
+
         info!(
-            "[DEATH] Player {:?} (id={}) died! Respawn in {}s",
-            entity, player_id.0, RESPAWN_DELAY
+            "[DEATH] Player {} killed by Player {}! Respawn in {}s",
+            victim_display.0, killer_display, RESPAWN_DELAY
         );
 
-        // Mark as dead — replicates to all clients.
-        // Tilt rotation sideways so the body looks fallen.
         commands.entity(entity).insert(PlayerDead);
         commands.entity(entity).insert(avian3d::prelude::Rotation(
             Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
         ));
         pending.timers.push((entity, time.elapsed_secs() + RESPAWN_DELAY));
+
+        // Spawn kill feed entry — replicated to all clients
+        let now = time.elapsed_secs();
+        commands.spawn((
+            KillFeedEntry {
+                killer_name: multiplayer::auth::client_id_to_base58(last_damaged_by.0),
+                victim_name: multiplayer::auth::client_id_to_base58(player_id.0),
+                timestamp: now,
+            },
+            Replicate::to_clients(NetworkTarget::All),
+        ));
     }
 }
 
@@ -191,7 +236,7 @@ fn check_player_death(
 /// This is the hook point for pay-to-respawn (Solana transaction check).
 fn process_respawns(
     mut pending: ResMut<PendingRespawns>,
-    mut query: Query<(&mut PlayerHealth, &mut Position, &PlayerId), With<PlayerDead>>,
+    mut query: Query<(&mut PlayerHealth, &mut Position, &mut avian3d::prelude::Rotation, &PlayerId), With<PlayerDead>>,
     mut commands: Commands,
     time: Res<Time>,
 ) {
@@ -201,7 +246,7 @@ fn process_respawns(
         if now >= pending.timers[i].1 {
             let (entity, _) = pending.timers.remove(i);
 
-            let Ok((mut health, mut position, player_id)) = query.get_mut(entity) else {
+            let Ok((mut health, mut position, mut rotation, player_id)) = query.get_mut(entity) else {
                 continue;
             };
 
@@ -209,6 +254,7 @@ fn process_respawns(
                 info!("[RESPAWN] Player {:?} (id={}) respawning", entity, player_id.0);
                 health.0 = 100;
                 position.0 = PLAYER_SPAWN_POS;
+                rotation.0 = Quat::IDENTITY;
                 commands.entity(entity).remove::<PlayerDead>();
             }
         } else {

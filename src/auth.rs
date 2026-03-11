@@ -85,6 +85,11 @@ pub fn pubkey_address(pubkey: &[u8; 32]) -> String {
     bs58_encode(pubkey)
 }
 
+/// Base58-encode a u64 client ID (first 8 bytes of pubkey) for display.
+pub fn client_id_to_base58(id: u64) -> String {
+    bs58_encode(&id.to_le_bytes())
+}
+
 /// Minimal base58 encoding (Solana address format).
 fn bs58_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
