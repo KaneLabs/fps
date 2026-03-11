@@ -120,14 +120,14 @@ pub struct JabAnimation {
 /// Shared observer: jab melee attack — short range punch, server applies damage.
 pub fn shared_jab(
     trigger: On<Fire<JabAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, Has<Predicted>, Has<Interpolated>)>,
-    mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &crate::protocol::PlayerId, Has<Predicted>, Has<Interpolated>)>,
+    mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_jab: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
     if is_interpolated { return; }
@@ -156,8 +156,11 @@ pub fn shared_jab(
     ) {
         info!("[JAB] Hit entity {:?} at distance {:.1}", hit.entity, hit.distance);
         if !is_predicted {
-            if let Ok((_entity, mut health, _pos)) = health_query.get_mut(hit.entity) {
+            if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
                 health.0 -= JAB_DAMAGE;
+                if let Some(mut last) = last_damaged {
+                    last.0 = attacker_id.0;
+                }
                 info!("[JAB] {} damage applied, health now: {}", JAB_DAMAGE, health.0);
             } else {
                 info!("[JAB] Hit entity {:?} but it has no PlayerHealth", hit.entity);
@@ -624,7 +627,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             model_path: "dirty-pickaxe.glb".to_string(),
             interaction_distance: 2.0,
             scale: 1.8,
-            model_rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+            model_rotation: [0.0, 0.0, 0.0],
             muzzle_offset: None,
         },
         Name::new("Pickaxe"),
@@ -857,7 +860,7 @@ pub fn sync_remote_equipped(
         let model_path = equippable.model_path.clone();
         let scale = equippable.scale;
         let [rx, ry, rz] = equippable.model_rotation;
-        let model_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
+        let model_rot = Quat::from_euler(EulerRot::YXZ, ry, rx, rz);
 
         let asset_path = GltfAssetLabel::Scene(0).from_asset(model_path);
         let model = commands
@@ -971,16 +974,16 @@ pub fn shared_drop(
 /// Only the server handles despawn + ore chunk spawn (replicates to all clients).
 pub fn shared_primary_action(
     trigger: On<Fire<PrimaryAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, Has<Predicted>, Has<Interpolated>)>,
+    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, &crate::protocol::PlayerId, Has<Predicted>, Has<Interpolated>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
-    mut health_query: Query<(Entity, &mut PlayerHealth, &Position)>,
+    mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
     equippable_query: Query<&Equippable>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_shot: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, equipped, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, equipped, attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
     if is_interpolated { return; }
@@ -1007,7 +1010,7 @@ pub fn shared_primary_action(
 
             // Log all players with colliders for debugging hit detection
             if !is_predicted {
-                for (e, hp, pos) in health_query.iter() {
+                for (e, hp, pos, _) in health_query.iter() {
                     info!(
                         "[SHOOT] Potential target: {:?} pos={:?} hp={} dist={:.1}",
                         e, pos.0, hp.0, eye_pos.distance(pos.0)
@@ -1030,8 +1033,11 @@ pub fn shared_primary_action(
                     hit.entity, hit.distance
                 );
                 if !is_predicted {
-                    if let Ok((_entity, mut health, _pos)) = health_query.get_mut(hit.entity) {
+                    if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
                         health.0 -= SHOOT_DAMAGE;
+                        if let Some(mut last) = last_damaged {
+                            last.0 = attacker_id.0;
+                        }
                         info!(
                             "[SHOOT] Player hit! {} damage applied, health now: {}",
                             SHOOT_DAMAGE, health.0
@@ -1195,7 +1201,7 @@ pub fn update_view_model(
     let asset_path = GltfAssetLabel::Scene(0).from_asset(equippable.model_path.clone());
     let model_handle = asset_server.load(asset_path);
     let [rx, ry, rz] = equippable.model_rotation;
-    let model_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
+    let model_rot = Quat::from_euler(EulerRot::YXZ, ry, rx, rz);
 
     let view_model = commands
         .spawn((

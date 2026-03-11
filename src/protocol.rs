@@ -120,11 +120,29 @@ impl Default for PlayerHealth {
     }
 }
 
+/// Sequential display ID (Player 1, Player 2, etc). Assigned by server on connect.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct PlayerDisplayId(pub u32);
+
+/// Tracks who last dealt damage to this player. Server sets this on hit.
+/// Used by death system to determine killer for kill feed.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct LastDamagedBy(pub u64);
+
 /// Marker: player is dead. Server-authoritative, replicated.
 /// While dead: input is ignored, player cannot move/shoot/interact.
 /// Removed by server on respawn (after timer + future payment gate).
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct PlayerDead;
+
+/// Kill feed entry. Server-authoritative, replicated to all clients.
+/// Stores truncated base58 addresses for display.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct KillFeedEntry {
+    pub killer_name: String,
+    pub victim_name: String,
+    pub timestamp: f32,
+}
 
 // --- Protocol Plugin ---
 
@@ -158,7 +176,10 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<PlayerEquipped>()
             .add_prediction();
         app.register_component::<PlayerHealth>();
+        app.register_component::<PlayerDisplayId>();
+        app.register_component::<LastDamagedBy>();
         app.register_component::<PlayerDead>();
+        app.register_component::<KillFeedEntry>();
 
         // Avian3d physics components with prediction + interpolation.
         // enable_correction() lets lightyear handle smooth corrections on Transform

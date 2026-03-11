@@ -142,7 +142,7 @@ fn main() {
 
     app.add_systems(
         Update,
-        (cleanup_tracers, animate_jab, health_hud, death_screen, log_health_changes)
+        (cleanup_tracers, animate_jab, health_hud, death_screen, kill_feed_ui, log_health_changes)
             .run_if(in_state(AppState::InGame)),
     );
 
@@ -158,7 +158,15 @@ fn main() {
 // ========================================
 
 fn setup(mut commands: Commands) {
-    commands.spawn((MenuCamera, Camera2d));
+    commands.spawn((
+        MenuCamera,
+        Camera2d,
+        Camera {
+            order: 10,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+    ));
 }
 
 /// Load custom fonts into egui. Runs every frame until the egui context is available.
@@ -695,8 +703,9 @@ fn despawn_menu(
     music: Option<Res<MenuMusicHandle>>,
     mut audio_instances: ResMut<Assets<AudioInstance>>,
 ) {
+    // Keep the Camera2d alive for egui HUD rendering — just remove the menu marker.
     for e in camera_query.iter() {
-        commands.entity(e).despawn();
+        commands.entity(e).remove::<MenuCamera>();
     }
     // Fade out menu music
     if let Some(music) = music {
@@ -823,46 +832,115 @@ fn health_hud(
 }
 
 /// Death screen overlay — shown when the controlled player has PlayerDead.
+/// Respawn delay must match server's RESPAWN_DELAY.
+const RESPAWN_DELAY: f32 = 20.0;
+
 fn death_screen(
     mut contexts: EguiContexts,
     player_query: Query<Has<multiplayer::protocol::PlayerDead>, With<Controlled>>,
+    time: Res<Time>,
+    mut death_start: Local<Option<f32>>,
     mut frame_count: Local<u32>,
 ) {
     *frame_count += 1;
     if *frame_count <= 2 { return; }
     let Ok(is_dead) = player_query.single() else { return; };
-    if !is_dead { return; }
+
+    if !is_dead {
+        *death_start = None;
+        return;
+    }
+
+    let now = time.elapsed_secs();
+    let start = *death_start.get_or_insert(now);
+    let elapsed = now - start;
+    let remaining = (RESPAWN_DELAY - elapsed).max(0.0).ceil() as u32;
+
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
-    egui::Area::new(egui::Id::new("death_screen"))
-        .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Foreground)
-        .interactable(false)
-        .show(ctx, |ui| {
-            let screen = ui.max_rect();
-            // Dark red overlay
-            ui.painter().rect_filled(
-                screen,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(80, 0, 0, 140),
-            );
-            // "YOU DIED" text
-            ui.painter().text(
-                screen.center(),
-                egui::Align2::CENTER_CENTER,
-                "YOU DIED",
-                cinzel_black(72.0),
-                egui::Color32::from_rgb(220, 40, 40),
-            );
-            // Respawn hint
-            ui.painter().text(
-                egui::pos2(screen.center().x, screen.center().y + 60.0),
-                egui::Align2::CENTER_CENTER,
-                "Respawning...",
-                chakra(16.0),
-                cream(0.5),
-            );
-        });
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("death_overlay")));
+
+    // Dark red overlay
+    painter.rect_filled(
+        screen,
+        0.0,
+        egui::Color32::from_rgba_unmultiplied(80, 0, 0, 140),
+    );
+    // "YOU DIED" text
+    painter.text(
+        screen.center(),
+        egui::Align2::CENTER_CENTER,
+        "YOU DIED",
+        cinzel_black(72.0),
+        egui::Color32::from_rgb(220, 40, 40),
+    );
+    // Countdown timer
+    painter.text(
+        egui::pos2(screen.center().x, screen.center().y + 60.0),
+        egui::Align2::CENTER_CENTER,
+        format!("Respawning in {}s", remaining),
+        chakra(16.0),
+        cream(0.5),
+    );
+}
+
+/// Kill feed display — shows recent kills at bottom-center of screen.
+/// KillFeedEntry entities are spawned by the server and replicated.
+const KILL_FEED_DURATION: f32 = 5.0;
+
+fn kill_feed_ui(
+    mut contexts: EguiContexts,
+    feed_query: Query<&multiplayer::protocol::KillFeedEntry>,
+    time: Res<Time>,
+    mut frame_count: Local<u32>,
+) {
+    *frame_count += 1;
+    if *frame_count <= 2 { return; }
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+
+    let now = time.elapsed_secs();
+    let screen = ctx.screen_rect();
+
+    // Collect recent kills (within KILL_FEED_DURATION seconds)
+    let mut entries: Vec<&multiplayer::protocol::KillFeedEntry> = feed_query
+        .iter()
+        .filter(|e| now - e.timestamp < KILL_FEED_DURATION)
+        .collect();
+    entries.sort_by(|a, b| b.timestamp.partial_cmp(&a.timestamp).unwrap());
+
+    if entries.is_empty() { return; }
+
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("kill_feed"),
+    ));
+
+    for (i, entry) in entries.iter().take(5).enumerate() {
+        let y = screen.bottom() - 90.0 - (i as f32 * 24.0);
+        let alpha = ((KILL_FEED_DURATION - (now - entry.timestamp)) / KILL_FEED_DURATION).clamp(0.0, 1.0);
+
+        // Background pill
+        let text = format!("{} killed {}", entry.killer_name, entry.victim_name);
+        let text_galley = painter.layout_no_wrap(text.clone(), chakra(13.0), cream(alpha));
+        let text_w = text_galley.size().x;
+        let pill_rect = egui::Rect::from_center_size(
+            egui::pos2(screen.center().x, y),
+            egui::vec2(text_w + 20.0, 22.0),
+        );
+        painter.rect_filled(
+            pill_rect,
+            11.0,
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, (140.0 * alpha) as u8),
+        );
+        painter.text(
+            egui::pos2(screen.center().x, y),
+            egui::Align2::CENTER_CENTER,
+            text,
+            chakra(13.0),
+            cream(alpha),
+        );
+    }
 }
 
 /// Predicted entity spawned — fires for our own player (which has Controlled).

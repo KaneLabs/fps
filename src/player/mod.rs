@@ -81,6 +81,7 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
         PlayerPitch::default(),
         PlayerEquipped::default(),
         PlayerHealth::default(),
+        crate::protocol::LastDamagedBy::default(),
         CharacterVelocity::default(),
         Position(PLAYER_SPAWN_POS),
         Rotation::default(),
