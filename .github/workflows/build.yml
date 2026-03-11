@@ -1,0 +1,168 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================
+  # Build server binary (Linux x86_64)
+  # ============================================
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: server-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: server-linux-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
+
+      - name: Build server
+        run: cargo build --release --bin server
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-linux-x64
+          path: target/release/server
+
+  # ============================================
+  # Build client binaries (macOS arm64 + Windows x64)
+  # ============================================
+  build-client:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: ialy-macos-arm64
+            binary: client
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: ialy-windows-x64
+            binary: client.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: client-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: client-${{ matrix.os }}-
+
+      - name: Build client
+        run: cargo build --release --bin client --target ${{ matrix.target }}
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/
+          cp -r assets dist/
+          cd dist && zip -r ../${{ matrix.artifact }}.zip .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" -Destination dist/
+          Copy-Item -Recurse assets dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  # ============================================
+  # Deploy server (on push to master)
+  # ============================================
+  deploy-server:
+    needs: build-server
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    environment: production
+    steps:
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: server-linux-x64
+          path: .
+
+      - name: Deploy to game server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Upload new binary
+          scp -i ~/.ssh/deploy_key server "root@${DEPLOY_HOST}:/opt/ialy/server.new"
+
+          # Atomic swap and restart
+          ssh -i ~/.ssh/deploy_key "root@${DEPLOY_HOST}" << 'REMOTE'
+            mv /opt/ialy/server.new /opt/ialy/server
+            chmod +x /opt/ialy/server
+            sudo systemctl restart ialy
+            sleep 2
+            systemctl is-active ialy
+          REMOTE
+
+  # ============================================
+  # Create GitHub Release (on version tag)
+  # ============================================
+  release:
+    needs: [build-client, build-server]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/ialy-macos-arm64/ialy-macos-arm64.zip
+            artifacts/ialy-windows-x64/ialy-windows-x64.zip
+            artifacts/server-linux-x64/server
