@@ -17,6 +17,13 @@ fn main() {
         DefaultPlugins
             .build()
             .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::render::RenderPlugin>()
+            .disable::<bevy::core_pipeline::CorePipelinePlugin>()
+            .disable::<bevy::pbr::PbrPlugin>()
+            .disable::<bevy::gltf::GltfPlugin>()
+            .disable::<bevy::sprite::SpritePlugin>()
+            .disable::<bevy::ui::UiPlugin>()
+            .disable::<bevy::text::TextPlugin>()
             .set(bevy::window::WindowPlugin {
                 primary_window: None,
                 primary_cursor_options: None,
