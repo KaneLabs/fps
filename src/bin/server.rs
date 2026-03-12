@@ -21,6 +21,7 @@ fn main() {
             .disable::<bevy::core_pipeline::CorePipelinePlugin>()
             .disable::<bevy::pbr::PbrPlugin>()
             .disable::<bevy::gltf::GltfPlugin>()
+            .disable::<bevy::sprite::SpritePlugin>()
             .disable::<bevy::ui::UiPlugin>()
             .disable::<bevy::text::TextPlugin>()
             .set(bevy::window::WindowPlugin {
