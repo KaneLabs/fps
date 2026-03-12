@@ -18,7 +18,6 @@ fn main() {
             .build()
             .disable::<bevy::winit::WinitPlugin>()
             .disable::<bevy::render::RenderPlugin>()
-            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
             .disable::<bevy::core_pipeline::CorePipelinePlugin>()
             .disable::<bevy::pbr::PbrPlugin>()
             .disable::<bevy::gltf::GltfPlugin>()
