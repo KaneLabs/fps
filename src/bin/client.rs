@@ -705,7 +705,11 @@ fn despawn_menu(
 }
 
 fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
+    let server_ip: Ipv4Addr = std::env::var("ANIMA_SERVER_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(Ipv4Addr::LOCALHOST);
+    let server_addr = SocketAddr::new(server_ip.into(), SERVER_PORT);
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
     let auth = Authentication::Manual {
