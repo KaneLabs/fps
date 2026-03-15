@@ -299,59 +299,48 @@ const DOOR_INTERACT_DISTANCE: f32 = 4.0;
 /// Server-only: spawns physics colliders for all static world geometry.
 /// No meshes, materials, or render layers — headless server doesn't render.
 pub fn spawn_world_physics(mut commands: Commands) {
-    // Floor
-    commands.spawn((
-        Transform::from_xyz(0.0, 0.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(100.0, 0.1, 100.0),
-        Friction::new(0.0),
-    ));
+    // Floor — 4 quadrants, each 500x500, total 1000x1000 centered at origin
+    // Boundaries at x=0 and z=0 (mesh server zone boundaries)
+    // NW quadrant (x: -500..0, z: -500..0)
+    commands.spawn((Transform::from_xyz(-250.0, 0.0, -250.0), RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0)));
+    // NE quadrant (x: 0..500, z: -500..0)
+    commands.spawn((Transform::from_xyz(250.0, 0.0, -250.0), RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0)));
+    // SW quadrant (x: -500..0, z: 0..500)
+    commands.spawn((Transform::from_xyz(-250.0, 0.0, 250.0), RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0)));
+    // SE quadrant (x: 0..500, z: 0..500)
+    commands.spawn((Transform::from_xyz(250.0, 0.0, 250.0), RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0)));
 
-    // West wall
-    commands.spawn((Transform::from_xyz(-5.0, 2.0, 0.0), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // East wall
-    commands.spawn((Transform::from_xyz(5.0, 2.0, 0.0), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // South wall
-    commands.spawn((Transform::from_xyz(0.0, 2.0, 5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // North wall left
-    commands.spawn((Transform::from_xyz(-3.25, 2.0, -5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
-    // North wall right
-    commands.spawn((Transform::from_xyz(3.25, 2.0, -5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
+    // All existing geometry in NW quadrant — world-space coordinates (no parenting for physics)
+    let o = Vec3::new(-125.0, 0.0, -125.0);
 
-    // Table
-    commands.spawn((Transform::from_xyz(0.0, 0.0, -3.0), RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(-5.0, 2.0, 0.0)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(5.0, 2.0, 0.0)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(0.0, 2.0, 5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(-3.25, 2.0, -5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(3.25, 2.0, -5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(0.0, 0.0, -3.0)), RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.0), Friction::new(0.0)));
 
-    // Staircase
     for i in 0..6 {
         let h = 0.5 * (i as f32 + 1.0);
-        commands.spawn((Transform::from_xyz(-6.0, h / 2.0, -8.0 - i as f32 * 1.5), RigidBody::Static, Collider::cuboid(2.0, h, 1.5), Friction::new(0.0)));
+        commands.spawn((Transform::from_translation(o + Vec3::new(-6.0, h / 2.0, -8.0 - i as f32 * 1.5)), RigidBody::Static, Collider::cuboid(2.0, h, 1.5), Friction::new(0.0)));
     }
 
-    // Ramp
-    commands.spawn((Transform::from_xyz(6.0, 1.5, -12.0).with_rotation(Quat::from_rotation_x(-0.25)), RigidBody::Static, Collider::cuboid(3.0, 0.2, 8.0), Friction::new(0.8)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(6.0, 1.5, -12.0)).with_rotation(Quat::from_rotation_x(-0.25)), RigidBody::Static, Collider::cuboid(3.0, 0.2, 8.0), Friction::new(0.8)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(0.0, 0.5, -9.0)), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(0.0, 0.5, -15.0)), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
 
-    // Platforms
-    commands.spawn((Transform::from_xyz(0.0, 0.5, -9.0), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
-    commands.spawn((Transform::from_xyz(0.0, 0.5, -15.0), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
-
-    // Stepping stones
     for (pos, _) in [
         (Vec3::new(0.0, 1.0, -20.0), 0), (Vec3::new(2.0, 1.5, -22.0), 0),
         (Vec3::new(-1.0, 2.0, -24.0), 0), (Vec3::new(1.5, 2.5, -26.0), 0),
         (Vec3::new(-0.5, 3.0, -28.0), 0),
     ] {
-        commands.spawn((Transform::from_translation(pos), RigidBody::Static, Collider::cuboid(1.5, 0.3, 1.5), Friction::new(0.0)));
+        commands.spawn((Transform::from_translation(o + pos), RigidBody::Static, Collider::cuboid(1.5, 0.3, 1.5), Friction::new(0.0)));
     }
 
-    // Pillars
-    commands.spawn((Transform::from_xyz(-6.0, 3.0, -20.0), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
-    commands.spawn((Transform::from_xyz(-6.0, 3.0, -24.0), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
-
-    // Low wall
-    commands.spawn((Transform::from_xyz(6.0, 0.6, -18.0), RigidBody::Static, Collider::cuboid(6.0, 1.2, 0.5), Friction::new(0.0)));
-
-    // Elevated walkway
-    commands.spawn((Transform::from_xyz(10.0, 2.0, -16.0), RigidBody::Static, Collider::cuboid(2.0, 0.3, 12.0), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(-6.0, 3.0, -20.0)), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(-6.0, 3.0, -24.0)), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(6.0, 0.6, -18.0)), RigidBody::Static, Collider::cuboid(6.0, 1.2, 0.5), Friction::new(0.0)));
+    commands.spawn((Transform::from_translation(o + Vec3::new(10.0, 2.0, -16.0)), RigidBody::Static, Collider::cuboid(2.0, 0.3, 12.0), Friction::new(0.0)));
 
     info!("Server: spawned world physics colliders");
 }
@@ -373,239 +362,116 @@ pub fn spawn_world_model(
     let yellow = materials.add(Color::from(tailwind::YELLOW_400));
 
     // ========================================
-    // FLOOR — large ground plane covering room + gym
+    // FLOOR — 4 quadrants, each 500x500, color-coded for mesh zone visibility
+    // Boundaries at x=0 and z=0 (mesh server zone boundaries)
     // ========================================
-    let floor = meshes.add(Plane3d::new(Vec3::Y, Vec2::new(50.0, 50.0)));
+    let quad_mesh = meshes.add(Plane3d::new(Vec3::Y, Vec2::new(250.0, 250.0)));
+    let nw_color = materials.add(Color::srgb(0.35, 0.45, 0.35)); // muted green
+    let ne_color = materials.add(Color::srgb(0.35, 0.35, 0.50)); // muted blue
+    let sw_color = materials.add(Color::srgb(0.50, 0.40, 0.30)); // muted orange
+    let se_color = materials.add(Color::srgb(0.45, 0.30, 0.35)); // muted red
+
+    // NW quadrant (x: -500..0, z: -500..0)
     commands.spawn((
-        Mesh3d(floor),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(0.0, 0.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(100.0, 0.1, 100.0),
-        Friction::new(0.0),
+        Mesh3d(quad_mesh.clone()), MeshMaterial3d(nw_color),
+        Transform::from_xyz(-250.0, 0.0, -250.0),
+        RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+    // NE quadrant (x: 0..500, z: -500..0)
+    commands.spawn((
+        Mesh3d(quad_mesh.clone()), MeshMaterial3d(ne_color),
+        Transform::from_xyz(250.0, 0.0, -250.0),
+        RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+    // SW quadrant (x: -500..0, z: 0..500)
+    commands.spawn((
+        Mesh3d(quad_mesh.clone()), MeshMaterial3d(sw_color),
+        Transform::from_xyz(-250.0, 0.0, 250.0),
+        RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
+    ));
+    // SE quadrant (x: 0..500, z: 0..500)
+    commands.spawn((
+        Mesh3d(quad_mesh), MeshMaterial3d(se_color),
+        Transform::from_xyz(250.0, 0.0, 250.0),
+        RigidBody::Static, Collider::cuboid(500.0, 0.1, 500.0), Friction::new(0.0),
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
     ));
 
     // ========================================
-    // STARTING ROOM — 10x10, walls with door gap in north wall
-    // (Door is a server-spawned replicated entity)
+    // All geometry in NW quadrant — world-space offset, no parenting
     // ========================================
+    let o = Vec3::new(-125.0, 0.0, -125.0);
+
     let wall = meshes.add(Cuboid::new(0.5, 4.0, 10.0));
     let half_wall = meshes.add(Cuboid::new(0.5, 4.0, 3.5));
 
-    // West wall (x = -5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(-5.0, 2.0, 0.0),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
+    // STARTING ROOM — walls
+    commands.spawn((Mesh3d(wall.clone()), MeshMaterial3d(white.clone()), Transform::from_translation(o + Vec3::new(-5.0, 2.0, 0.0)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
+    commands.spawn((Mesh3d(wall.clone()), MeshMaterial3d(white.clone()), Transform::from_translation(o + Vec3::new(5.0, 2.0, 0.0)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
+    commands.spawn((Mesh3d(wall.clone()), MeshMaterial3d(white.clone()), Transform::from_translation(o + Vec3::new(0.0, 2.0, 5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
+    commands.spawn((Mesh3d(half_wall.clone()), MeshMaterial3d(white.clone()), Transform::from_translation(o + Vec3::new(-3.25, 2.0, -5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
+    commands.spawn((Mesh3d(half_wall.clone()), MeshMaterial3d(white.clone()), Transform::from_translation(o + Vec3::new(3.25, 2.0, -5.0)).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
 
-    // East wall (x = 5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(5.0, 2.0, 0.0),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // South wall (z = 5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(0.0, 2.0, 5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // North wall — split into two halves with a 3-unit door gap in the center
-    // Left half (x = -5 to x = -1.5)
-    commands.spawn((
-        Mesh3d(half_wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(-3.25, 2.0, -5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 3.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-    // Right half (x = 1.5 to x = 5)
-    commands.spawn((
-        Mesh3d(half_wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(3.25, 2.0, -5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 3.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // Table in room
+    // Table
     let table_size = Vec3::new(2.0, 1.0, 1.0);
     let table = meshes.add(Cuboid::new(table_size.x, table_size.y, table_size.z));
-    commands.spawn((
-        Mesh3d(table),
-        MeshMaterial3d(wood.clone()),
-        Transform::from_xyz(0.0, 0.0, -3.0),
-        RigidBody::Static,
-        Collider::cuboid(table_size.x, table_size.y, table_size.z),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
+    commands.spawn((Mesh3d(table), MeshMaterial3d(wood.clone()), Transform::from_translation(o + Vec3::new(0.0, 0.0, -3.0)), RigidBody::Static, Collider::cuboid(table_size.x, table_size.y, table_size.z), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER])));
 
-    // ========================================
-    // PHYSICS GYM — north of the room (z < -6)
-    // ========================================
-
-    // --- Staircase (ascending blocks, left side) ---
+    // PHYSICS GYM — staircase
     for i in 0..6 {
         let step_height = 0.5 * (i as f32 + 1.0);
         let step = meshes.add(Cuboid::new(2.0, step_height, 1.5));
-        commands.spawn((
-            Mesh3d(step),
-            MeshMaterial3d(gray.clone()),
-            Transform::from_xyz(-6.0, step_height / 2.0, -8.0 - i as f32 * 1.5),
-            RigidBody::Static,
-            Collider::cuboid(2.0, step_height, 1.5),
-            Friction::new(0.0),
-            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-            Name::new(format!("Stair {}", i + 1)),
-        ));
+        commands.spawn((Mesh3d(step), MeshMaterial3d(gray.clone()), Transform::from_translation(o + Vec3::new(-6.0, step_height / 2.0, -8.0 - i as f32 * 1.5)), RigidBody::Static, Collider::cuboid(2.0, step_height, 1.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new(format!("Stair {}", i + 1))));
     }
 
-    // --- Ramp (right side) ---
+    // Ramp
     let ramp = meshes.add(Cuboid::new(3.0, 0.2, 8.0));
-    commands.spawn((
-        Mesh3d(ramp),
-        MeshMaterial3d(green.clone()),
-        Transform::from_xyz(6.0, 1.5, -12.0)
-            .with_rotation(Quat::from_rotation_x(-0.25)), // ~14 degree incline
-        RigidBody::Static,
-        Collider::cuboid(3.0, 0.2, 8.0),
-        Friction::new(0.8),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Ramp"),
-    ));
+    commands.spawn((Mesh3d(ramp), MeshMaterial3d(green.clone()), Transform::from_translation(o + Vec3::new(6.0, 1.5, -12.0)).with_rotation(Quat::from_rotation_x(-0.25)), RigidBody::Static, Collider::cuboid(3.0, 0.2, 8.0), Friction::new(0.8), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Ramp")));
 
-    // --- Jump gap (center) — two platforms with a gap ---
+    // Jump platforms
     let platform = meshes.add(Cuboid::new(3.0, 1.0, 3.0));
+    commands.spawn((Mesh3d(platform.clone()), MeshMaterial3d(blue.clone()), Transform::from_translation(o + Vec3::new(0.0, 0.5, -9.0)), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Jump Platform Near")));
+    commands.spawn((Mesh3d(platform.clone()), MeshMaterial3d(blue.clone()), Transform::from_translation(o + Vec3::new(0.0, 0.5, -15.0)), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Jump Platform Far")));
 
-    // Near platform
-    commands.spawn((
-        Mesh3d(platform.clone()),
-        MeshMaterial3d(blue.clone()),
-        Transform::from_xyz(0.0, 0.5, -9.0),
-        RigidBody::Static,
-        Collider::cuboid(3.0, 1.0, 3.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Jump Platform Near"),
-    ));
-
-    // Far platform (3-unit gap)
-    commands.spawn((
-        Mesh3d(platform.clone()),
-        MeshMaterial3d(blue.clone()),
-        Transform::from_xyz(0.0, 0.5, -15.0),
-        RigidBody::Static,
-        Collider::cuboid(3.0, 1.0, 3.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Jump Platform Far"),
-    ));
-
-    // --- Stepping stones (various heights) ---
+    // Stepping stones
     let stone = meshes.add(Cuboid::new(1.5, 0.3, 1.5));
-    let stone_positions = [
+    for (i, (pos, mat)) in [
         (Vec3::new(0.0, 1.0, -20.0), yellow.clone()),
         (Vec3::new(2.0, 1.5, -22.0), red.clone()),
         (Vec3::new(-1.0, 2.0, -24.0), green.clone()),
         (Vec3::new(1.5, 2.5, -26.0), blue.clone()),
         (Vec3::new(-0.5, 3.0, -28.0), yellow.clone()),
-    ];
-
-    for (i, (pos, mat)) in stone_positions.into_iter().enumerate() {
-        commands.spawn((
-            Mesh3d(stone.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos),
-            RigidBody::Static,
-            Collider::cuboid(1.5, 0.3, 1.5),
-            Friction::new(0.0),
-            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-            Name::new(format!("Stepping Stone {}", i + 1)),
-        ));
+    ].into_iter().enumerate() {
+        commands.spawn((Mesh3d(stone.clone()), MeshMaterial3d(mat), Transform::from_translation(o + pos), RigidBody::Static, Collider::cuboid(1.5, 0.3, 1.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new(format!("Stepping Stone {}", i + 1))));
     }
 
-    // --- Tall pillars to jump between ---
+    // Pillars
     let pillar = meshes.add(Cuboid::new(1.5, 6.0, 1.5));
-    commands.spawn((
-        Mesh3d(pillar.clone()),
-        MeshMaterial3d(dark_gray.clone()),
-        Transform::from_xyz(-6.0, 3.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(1.5, 6.0, 1.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Pillar 1"),
-    ));
-    commands.spawn((
-        Mesh3d(pillar),
-        MeshMaterial3d(dark_gray.clone()),
-        Transform::from_xyz(-6.0, 3.0, -24.0),
-        RigidBody::Static,
-        Collider::cuboid(1.5, 6.0, 1.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Pillar 2"),
-    ));
+    commands.spawn((Mesh3d(pillar.clone()), MeshMaterial3d(dark_gray.clone()), Transform::from_translation(o + Vec3::new(-6.0, 3.0, -20.0)), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Pillar 1")));
+    commands.spawn((Mesh3d(pillar), MeshMaterial3d(dark_gray.clone()), Transform::from_translation(o + Vec3::new(-6.0, 3.0, -24.0)), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Pillar 2")));
 
-    // --- Wide low wall to jump over ---
+    // Low wall
     let low_wall = meshes.add(Cuboid::new(6.0, 1.2, 0.5));
-    commands.spawn((
-        Mesh3d(low_wall),
-        MeshMaterial3d(red.clone()),
-        Transform::from_xyz(6.0, 0.6, -18.0),
-        RigidBody::Static,
-        Collider::cuboid(6.0, 1.2, 0.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Low Wall"),
-    ));
+    commands.spawn((Mesh3d(low_wall), MeshMaterial3d(red.clone()), Transform::from_translation(o + Vec3::new(6.0, 0.6, -18.0)), RigidBody::Static, Collider::cuboid(6.0, 1.2, 0.5), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Low Wall")));
 
-    // --- Elevated walkway ---
+    // Elevated walkway
     let walkway = meshes.add(Cuboid::new(2.0, 0.3, 12.0));
-    commands.spawn((
-        Mesh3d(walkway),
-        MeshMaterial3d(gray.clone()),
-        Transform::from_xyz(10.0, 2.0, -16.0),
-        RigidBody::Static,
-        Collider::cuboid(2.0, 0.3, 12.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Elevated Walkway"),
-    ));
+    commands.spawn((Mesh3d(walkway), MeshMaterial3d(gray.clone()), Transform::from_translation(o + Vec3::new(10.0, 2.0, -16.0)), RigidBody::Static, Collider::cuboid(2.0, 0.3, 12.0), Friction::new(0.0), RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]), Name::new("Elevated Walkway")));
 
-    info!("Spawned world: room with door gap + physics gym");
+    info!("Spawned world: room with door gap + physics gym (NW quadrant)");
 }
 
 /// Server-only: spawns interactive world objects as replicated entities.
 /// Clients receive these via lightyear replication and add rendering in observers.
 pub fn spawn_server_interactive_objects(mut commands: Commands) {
+    let o = Vec3::new(-125.0, 0.0, -125.0);
+
     // Door in the north wall gap
     commands.spawn((
-        Position(Vec3::new(0.0, 2.0, -5.0)),
+        Position(o + Vec3::new(0.0, 2.0, -5.0)),
         Rotation::default(),
         RigidBody::Static,
         Collider::cuboid(3.0, 4.0, 0.3),
@@ -617,7 +483,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
 
     // Pickaxe on the table
     commands.spawn((
-        Position(Vec3::new(0.0, 0.5, -3.0)),
+        Position(o + Vec3::new(0.0, 0.5, -3.0)),
         Rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
         RigidBody::Kinematic,
         Collider::cuboid(0.6, 0.2, 0.6),
@@ -636,7 +502,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
 
     // AK47 on the table
     commands.spawn((
-        Position(Vec3::new(-1.0, 0.5, -3.0)),
+        Position(o + Vec3::new(-1.0, 0.5, -3.0)),
         Rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
         RigidBody::Kinematic,
         Collider::cuboid(0.6, 0.2, 0.6),
@@ -657,7 +523,7 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
 
     // Ore block in room
     commands.spawn((
-        Position(Vec3::new(2.0, 0.5, -3.0)),
+        Position(o + Vec3::new(2.0, 0.5, -3.0)),
         Rotation::default(),
         RigidBody::Static,
         Collider::cuboid(0.5, 0.5, 0.5),

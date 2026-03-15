@@ -19,7 +19,7 @@ pub const GRAVITY: f32 = 32.0;
 pub const SKIN_WIDTH: f32 = 0.02;
 pub const STEP_HEIGHT: f32 = 0.1;
 pub const VIEW_MODEL_RENDER_LAYER: usize = 1;
-pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(-125.0, 2.0, -125.0);
 
 /// Capsule dimensions (must match Collider in physics bundle)
 const CAPSULE_RADIUS: f32 = 0.5;

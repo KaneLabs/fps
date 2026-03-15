@@ -4,6 +4,7 @@ use lightyear::avian3d::plugin::AvianReplicationMode;
 use lightyear::avian3d::prelude::*;
 
 pub mod auth;
+pub mod mesh;
 pub mod player;
 pub mod protocol;
 pub mod world;

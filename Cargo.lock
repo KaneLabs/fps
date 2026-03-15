@@ -919,9 +919,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_enhanced_input"
-version = "0.22.2"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e4981e85546349e7ccce7e68aaf9c36e6eed556f7f29087dee184ee7941fb9"
+checksum = "c3eb80814d4c89323dd5489a6e85e5f83ea0d62127541822e2978d7b2c81b9d7"
 dependencies = [
  "bevy",
  "bevy_enhanced_input_macros",
@@ -934,9 +934,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_enhanced_input_macros"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4680cc23f335f1b768caf91a94b1aa1d786149788644043fe8d49e5708b5cbcc"
+checksum = "03a283d2eb7bf4ebec559f337ba88ccb246ec17e1237fcfc3ad78a2b9b715614"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3993,8 +3993,6 @@ dependencies = [
 [[package]]
 name = "lightyear"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be51d4b8fe01a81efe7b0e53f1d5577719a507ca3bbd40cadcbf3ccaea82030d"
 dependencies = [
  "aeronet_io",
  "bevy_app",
@@ -4037,8 +4035,6 @@ dependencies = [
 [[package]]
 name = "lightyear_aeronet"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a8e7f2b66a63bba410403708bf9c98a7c8e0834a0a069db010e63e669e6735b"
 dependencies = [
  "aeronet_io",
  "bevy_app",
@@ -4052,8 +4048,6 @@ dependencies = [
 [[package]]
 name = "lightyear_avian2d"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3229fb076a2750bcf41037c6af553a8cb1dc59e3cdd1f7c8e0d6ae7cd855dc03"
 dependencies = [
  "avian2d",
  "bevy_app",
@@ -4074,8 +4068,6 @@ dependencies = [
 [[package]]
 name = "lightyear_avian3d"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca582724703dccafe64991bbe0d480e616de7e1056b07cd9c6862a48196b9ce0"
 dependencies = [
  "avian3d",
  "bevy_app",
@@ -4096,8 +4088,6 @@ dependencies = [
 [[package]]
 name = "lightyear_connection"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad7fa5c7b928074895a56e96d0154e78cbc4e751f37e1a9b0b5fda469eb28c74"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4116,8 +4106,6 @@ dependencies = [
 [[package]]
 name = "lightyear_core"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a310d13cb0059fd20f59ec60b24056403ffc2388daabbc663c8eb1d4a08ddf4"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4136,8 +4124,6 @@ dependencies = [
 [[package]]
 name = "lightyear_frame_interpolation"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66ce32814bfcd07d1b694443dd988d3e842976e87223ec48fc18283e8e0046ab"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4156,8 +4142,6 @@ dependencies = [
 [[package]]
 name = "lightyear_inputs"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4bbfad8e59fbd0d569a2e359be47a7a1b28fc8e494ae124eb2b5efbec54b8e2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4180,8 +4164,6 @@ dependencies = [
 [[package]]
 name = "lightyear_inputs_bei"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2266633e2eeebfe5fcd5d3cea8984bc26b24b13942fd9c1aa9123da4de6c1a02"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4202,8 +4184,6 @@ dependencies = [
 [[package]]
 name = "lightyear_inputs_leafwing"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2cfbd794d8a42f06796acc6b8d4274d3fb53cd58f480881d2dd59176f076e49"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4223,8 +4203,6 @@ dependencies = [
 [[package]]
 name = "lightyear_inputs_native"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c992924e07b463528f34987fbd6b2248f37a66cfd41757dd9b9f8b5085765cdc"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4239,8 +4217,6 @@ dependencies = [
 [[package]]
 name = "lightyear_interpolation"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4545cb52f0232da161dd93836e5b4f23816850330ef322ba6bd3abba2a20f21"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4264,8 +4240,6 @@ dependencies = [
 [[package]]
 name = "lightyear_link"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ede74a86374f21606be56aaf1c1bf9dd333f473866bd780ab449653f0caca24"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4279,10 +4253,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightyear_mesh"
+version = "0.26.4"
+dependencies = [
+ "aeronet_io",
+ "bevy_app",
+ "bevy_ecs",
+ "bevy_platform",
+ "bincode",
+ "bytes",
+ "lightyear_core",
+ "lightyear_link",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "lightyear_messages"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1141fb3d9895f5c9e8aa5d723d9b9bf9db800fd044ba8c8b542ac660beeab47"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4303,8 +4292,6 @@ dependencies = [
 [[package]]
 name = "lightyear_metrics"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d3264ac1729043c949bf2c9526bfa712a1c7e683e4e0034ce7cac0f233c19db"
 dependencies = [
  "bevy_app",
  "bevy_color",
@@ -4323,8 +4310,6 @@ dependencies = [
 [[package]]
 name = "lightyear_netcode"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db834d08f6826a2c25c9a355a33bb0db036da2da98b5f43b3982e6b5c41a0f4e"
 dependencies = [
  "aeronet_io",
  "bevy_app",
@@ -4349,8 +4334,6 @@ dependencies = [
 [[package]]
 name = "lightyear_prediction"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3ddda7d875590a2f91c082dd339507b79eb3221661f50fca18e6c2fdafbcc6c"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4378,8 +4361,6 @@ dependencies = [
 [[package]]
 name = "lightyear_raw_connection"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "631b5527b4f11d1e199f823ecdcd02585136fc55dd3261d5280e03bbcc29cdd3"
 dependencies = [
  "aeronet_io",
  "bevy_app",
@@ -4394,8 +4375,6 @@ dependencies = [
 [[package]]
 name = "lightyear_replication"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a451536b73e618035472548e8d7f1af51e193649f556318f7836ddc70e6f73d2"
 dependencies = [
  "avian2d",
  "avian3d",
@@ -4430,8 +4409,6 @@ dependencies = [
 [[package]]
 name = "lightyear_serde"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c00dfe55ea4ba8413424616564b36c64d404fe9f5c68e4d71c4a97193da3d6e"
 dependencies = [
  "bevy_derive",
  "bevy_ecs",
@@ -4451,8 +4428,6 @@ dependencies = [
 [[package]]
 name = "lightyear_steam"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b513c7aaeeaee3fbfe82e4ab7698cc3360d42526d167054af357920a166566"
 dependencies = [
  "aeronet_io",
  "aeronet_steam",
@@ -4469,8 +4444,6 @@ dependencies = [
 [[package]]
 name = "lightyear_sync"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "834af4e025c9d7954c9684d82255e5ed639e0ce4482e3c674582687ce1f2dbfd"
 dependencies = [
  "bevy_app",
  "bevy_derive",
@@ -4493,8 +4466,6 @@ dependencies = [
 [[package]]
 name = "lightyear_transport"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "272b66fae233f66887cbef40c30d2a7673d299d327a9fdd2becbd3b2ae59336b"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4522,8 +4493,6 @@ dependencies = [
 [[package]]
 name = "lightyear_udp"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "367cdb2e11ac6448bec036a26ce1aa7a97a695e1a50a28e2d3d4e3f8ae34c670"
 dependencies = [
  "aeronet_io",
  "bevy_app",
@@ -4539,8 +4508,6 @@ dependencies = [
 [[package]]
 name = "lightyear_ui"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd20cb05463553dd19006a2e318b86b2afb6db8e9e8e46931fc6592d8069e3c2"
 dependencies = [
  "bevy_app",
  "bevy_color",
@@ -4560,8 +4527,6 @@ dependencies = [
 [[package]]
 name = "lightyear_utils"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9a54a63441f9001dc834fc8e6b4bb23eeb8f6b2ef28db8c65b4bfbf9496b139"
 dependencies = [
  "bevy_ecs",
  "bevy_platform",
@@ -4576,8 +4541,6 @@ dependencies = [
 [[package]]
 name = "lightyear_web"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72450d46e6c5052c174e3723e14fd78726ffca7e00e64b6f9342cdd642621eb6"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4589,8 +4552,6 @@ dependencies = [
 [[package]]
 name = "lightyear_websocket"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3e5ee75b46e0be8f9e746f1b53464376715d400fbddb4a3faf8fb348eec2919"
 dependencies = [
  "aeronet_io",
  "aeronet_websocket",
@@ -4606,8 +4567,6 @@ dependencies = [
 [[package]]
 name = "lightyear_webtransport"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c100a3f88ced77327f04ab3e583ecca627e53d93031c5aaf7c2260d6c9faf25"
 dependencies = [
  "aeronet_io",
  "aeronet_webtransport",
@@ -4823,6 +4782,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "lightyear",
+ "lightyear_mesh",
  "rand 0.8.5",
  "serde",
  "serde_json",

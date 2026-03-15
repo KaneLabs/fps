@@ -14,6 +14,7 @@ use lightyear::prelude::*;
 
 use multiplayer::player::*;
 use multiplayer::protocol::*;
+use lightyear_mesh::prelude::MeshControlled;
 use multiplayer::world::{
     spawn_lights, spawn_world_model, update_view_model, WorldModelCamera, DEFAULT_RENDER_LAYER,
     interaction_ui_system, init_replicated_doors, init_replicated_equippables,
@@ -89,6 +90,7 @@ fn main() {
         tick_duration: Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
     });
     app.add_plugins(SharedPlugin);
+    app.add_plugins(multiplayer::mesh::GameMeshClientPlugin);
     app.init_state::<AppState>();
     app.insert_resource(CursorState::default());
     // One Camera2d in Startup — persists until InGame
@@ -143,6 +145,13 @@ fn main() {
     app.add_systems(
         Update,
         (cleanup_tracers, animate_jab, health_hud, death_screen, kill_feed_ui, log_health_changes)
+            .run_if(in_state(AppState::InGame)),
+    );
+
+    // Mesh authority watcher — disconnects and reconnects on authority change
+    app.add_systems(
+        Update,
+        (watch_authority_change, process_pending_reconnect)
             .run_if(in_state(AppState::InGame)),
     );
 
@@ -717,9 +726,24 @@ fn despawn_menu(
 }
 
 fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), SERVER_PORT);
-    let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
+    let server_addr_str = std::env::var("ANIMA_SERVER_ADDR")
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", SERVER_PORT));
+    let server_addr: SocketAddr = server_addr_str.parse().expect("Invalid ANIMA_SERVER_ADDR");
+    let server_id: u16 = std::env::var("MESH_PRIMARY_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
 
+    spawn_server_connection(&mut commands, &identity, server_addr, server_id);
+}
+
+/// Spawn a lightyear client connection to a specific server.
+fn spawn_server_connection(
+    commands: &mut Commands,
+    identity: &multiplayer::auth::ClientIdentity,
+    server_addr: SocketAddr,
+    server_id: u16,
+) -> Entity {
     let auth = Authentication::Manual {
         server_addr,
         client_id: identity.client_id,
@@ -727,7 +751,7 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
         protocol_id: PROTOCOL_ID,
     };
 
-    info!("Connecting as {} (id={})", identity.address, identity.client_id);
+    info!("[MESH] Connecting to server {} at {} as {}", server_id, server_addr, identity.address);
 
     let netcode_config = NetcodeConfig {
         client_timeout_secs: 120,
@@ -741,7 +765,7 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
             Link::default(),
             NetcodeClient::new(auth, netcode_config).expect("Failed to create netcode client"),
             UdpIo::default(),
-            LocalAddr(client_addr),
+            LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
             PeerAddr(server_addr),
             ReplicationReceiver::default(),
             PredictionManager::default(),
@@ -750,10 +774,101 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
                 SendUpdatesMode::SinceLastAck,
                 false,
             ),
+            ActiveServerConnection { server_id },
         ))
         .id();
 
     commands.trigger(Connect { entity: client_entity });
+    client_entity
+}
+
+/// Marker for the active server connection entity.
+#[derive(Component)]
+struct ActiveServerConnection {
+    server_id: u16,
+}
+
+/// Pending reconnection to a new server after authority change.
+#[derive(Resource)]
+struct PendingReconnect {
+    target_addr: SocketAddr,
+    target_server_id: u16,
+}
+
+/// Watches MeshControlled.authority_server for changes.
+/// When authority moves to a different server, initiates reconnect.
+fn watch_authority_change(
+    mesh_query: Query<&MeshControlled, (With<Controlled>, Changed<MeshControlled>)>,
+    connection_query: Query<(Entity, &ActiveServerConnection)>,
+    mut commands: Commands,
+) {
+    let Ok(mesh_controlled) = mesh_query.single() else {
+        return;
+    };
+
+    // Check if authority changed to a different server than we're connected to
+    let Ok((conn_entity, conn)) = connection_query.single() else {
+        return;
+    };
+
+    if mesh_controlled.authority_server == conn.server_id {
+        return;
+    }
+
+    // Find the new server's address from MeshControlled.neighbors
+    let new_server_id = mesh_controlled.authority_server;
+    let Some(neighbor) = mesh_controlled.neighbors.iter().find(|n| n.id == new_server_id) else {
+        warn!("[MESH] Authority changed to server {} but no neighbor info found!", new_server_id);
+        return;
+    };
+
+    let Ok(target_addr) = neighbor.address.parse::<SocketAddr>() else {
+        warn!("[MESH] Invalid neighbor address: {}", neighbor.address);
+        return;
+    };
+
+    info!(
+        "[MESH] Authority changed: server {} -> server {} ({}). Initiating reconnect.",
+        conn.server_id, new_server_id, target_addr
+    );
+
+    // Disconnect from old server (let lightyear handle cleanup)
+    commands.trigger(Disconnect { entity: conn_entity });
+    // Remove our marker so process_pending_reconnect can detect when it's gone
+    commands.entity(conn_entity).remove::<ActiveServerConnection>();
+
+    info!("[MESH] Disconnected from server {}. Reconnecting to server {} at {}", conn.server_id, new_server_id, target_addr);
+
+    // Store reconnect target — a system will pick this up next frame
+    // (can't spawn new connection in same frame as despawn due to command ordering)
+    commands.insert_resource(PendingReconnect {
+        target_addr,
+        target_server_id: new_server_id,
+    });
+}
+
+/// After disconnect, reconnect to the new authority server.
+/// Waits until no ActiveServerConnection exists (old one cleaned up).
+fn process_pending_reconnect(
+    pending: Option<Res<PendingReconnect>>,
+    active_connections: Query<&ActiveServerConnection>,
+    identity: Res<multiplayer::auth::ClientIdentity>,
+    mut commands: Commands,
+) {
+    let Some(pending) = pending else { return; };
+
+    // Wait until old connection marker is gone
+    if active_connections.iter().count() > 0 {
+        return;
+    }
+
+    info!(
+        "[MESH] Reconnecting to server {} at {}",
+        pending.target_server_id, pending.target_addr
+    );
+
+    spawn_server_connection(&mut commands, &identity, pending.target_addr, pending.target_server_id);
+    commands.remove_resource::<PendingReconnect>();
 }
 
 // ========================================

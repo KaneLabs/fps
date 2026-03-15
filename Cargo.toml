@@ -40,9 +40,10 @@ bevy = {version = "0.18", default-features = false, features = [
   "reflect_auto_register",
 ]}
 
-lightyear = {version = "0.26", features = ["netcode", "udp", "input_bei", "avian3d", "frame_interpolation"]}
+lightyear = {path = "../lightyear/lightyear", features = ["netcode", "udp", "input_bei", "avian3d", "frame_interpolation"]}
+lightyear_mesh = {path = "../lightyear/lightyear_mesh"}
 avian3d = {version = "0.5", default-features = false, features = ["3d", "f32", "parry-f32", "serialize"]}
-bevy_enhanced_input = {version = "0.22", features = ["serialize"]}
+bevy_enhanced_input = {version = "0.23", features = ["serialize"]}
 bevy_egui = "0.39"
 bevy_kira_audio = {version = "0.25", features = ["mp3"]}
 serde = {version = "1.0", features = ["derive"]}

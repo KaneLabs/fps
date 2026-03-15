@@ -4,11 +4,15 @@ use std::time::Duration;
 use bevy::prelude::*;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use lightyear::prelude::Lifetime;
 
+use multiplayer::mesh::{GameMeshPlugin, MeshActive, MeshConfig, MeshIdGen, NeighborConfig};
 use multiplayer::player::{player_physics_bundle, player_replicated_bundle, PLAYER_SPAWN_POS};
-use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerDead, PlayerHealth, PlayerDisplayId};
+use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerContext, PlayerDead, PlayerHealth, PlayerDisplayId};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
+use lightyear_mesh::prelude::*;
+use lightyear_mesh::dual_sim::BoundaryAxis;
 
 use avian3d::prelude::Position;
 
@@ -46,6 +50,9 @@ fn main() {
     // Shared: protocol, physics, frame interpolation, movement observer
     app.add_plugins(SharedPlugin);
 
+    // Mesh networking (activates only if MESH_ZONE env var is set)
+    app.add_plugins(GameMeshPlugin);
+
     // World — physics only, no rendering on headless server
     app.add_systems(Startup, spawn_world_physics);
     app.add_systems(Startup, spawn_server);
@@ -66,7 +73,11 @@ fn main() {
 }
 
 fn spawn_server(mut commands: Commands) {
-    let server_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), SERVER_PORT);
+    let port = std::env::var("SERVER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(SERVER_PORT);
+    let server_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
 
     let server_entity = commands
         .spawn((
@@ -112,8 +123,12 @@ struct PlayerCounter(u32);
 fn handle_connected(
     trigger: On<Add, Connected>,
     query: Query<(&RemoteId, Has<ReplicationSender>), With<ClientOf>>,
+    existing_players: Query<(Entity, &PlayerId)>,
     mut commands: Commands,
     mut counter: ResMut<PlayerCounter>,
+    mesh_active: Option<Res<MeshActive>>,
+    mesh_id_gen: Option<Res<MeshIdGen>>,
+    mesh_config: Option<Res<MeshConfig>>,
 ) {
     let entity = trigger.entity;
     let Ok((remote_id, has_sender)) = query.get(entity) else {
@@ -140,13 +155,79 @@ fn handle_connected(
         );
     }
 
+    // If mesh is active, check if this client's player entity already exists
+    // (from mesh ghost sync → authority claim). If so, re-associate instead of spawning new.
+    if mesh_active.is_some() {
+        // Look for an existing entity with this PlayerId (arrived via mesh)
+        let existing = existing_players.iter().find(|(_, pid)| pid.0 == client_id_bits);
+        if let Some((existing_entity, _)) = existing {
+            info!(
+                "[MESH] Client {} reconnected — re-associating existing entity {:?}",
+                client_id_bits, existing_entity
+            );
+            // Update MeshControlled with THIS server's perspective
+            let config = mesh_config.as_ref().expect("MeshConfig must exist when mesh is active");
+            let updated_controlled = MeshControlled {
+                authority_server: config.server_id,
+                zone_bounds: ZoneBounds {
+                    min_x: config.zone_min_x,
+                    min_z: -500.0,
+                    max_x: config.zone_max_x,
+                    max_z: 500.0,
+                },
+                neighbors: config.neighbors.iter().map(|n| MeshNeighborInfo {
+                    id: n.id,
+                    address: n.game_addr.to_string(),
+                    boundary: BoundaryKind::Seamless,
+                    zone_bounds: ZoneBounds {
+                        min_x: n.zone_min_x,
+                        min_z: -500.0,
+                        max_x: n.zone_max_x,
+                        max_z: 500.0,
+                    },
+                }).collect(),
+                active_connections: vec![config.server_id],
+            };
+
+            commands.entity(existing_entity).insert((
+                // Lightyear replication
+                ControlledBy {
+                    owner: entity,
+                    lifetime: Lifetime::Persistent,
+                },
+                Replicate::to_clients(NetworkTarget::All),
+                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
+                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+                // Gameplay components the ghost doesn't have
+                PlayerContext,
+                player_physics_bundle(),
+                // Updated mesh context with this server's neighbors
+                updated_controlled,
+            ));
+            commands.queue(ForcePositionUpdate);
+            return;
+        }
+
+        // If spawn point is outside our zone, skip (will arrive via mesh)
+        if let Some(ref config) = mesh_config {
+            let spawn_x = PLAYER_SPAWN_POS.x;
+            if spawn_x < config.zone_min_x || spawn_x >= config.zone_max_x {
+                info!(
+                    "Client {} connected but spawn ({}) is outside our zone [{}, {}] — skipping player spawn",
+                    client_id_bits, spawn_x, config.zone_min_x, config.zone_max_x
+                );
+                return;
+            }
+        }
+    }
+
     // CS/Valorant-style replication:
     // - Owning client gets prediction (instant local movement, rollback on mismatch)
     // - All other clients get interpolation (smooth, slightly delayed, no rubberbanding)
     counter.0 += 1;
     let display_id = counter.0;
 
-    commands.spawn((
+    let mut player = commands.spawn((
         player_replicated_bundle(client_id_bits),
         player_physics_bundle(),
         PlayerDisplayId(display_id),
@@ -155,9 +236,64 @@ fn handle_connected(
         InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
         ControlledBy {
             owner: entity,
-            lifetime: Default::default(),
+            lifetime: if mesh_active.is_some() { Lifetime::Persistent } else { Default::default() },
         },
     ));
+
+    // If mesh is active, add mesh components so this entity syncs to neighbor servers
+    if mesh_active.is_some() {
+        if let Some(id_gen) = mesh_id_gen {
+            let mesh_id = id_gen.0.next();
+
+            // Determine which side of the boundary this server owns
+            // Boundary is at zone_max_x (east edge) or zone_min_x (west edge)
+            // For Server 1 (zone -500..0): boundary at x=0, my side is negative
+            // For Server 2 (zone 0..500): boundary at x=0, my side is positive
+            let dual_sim = if let Some(ref config) = mesh_config {
+                let boundary_x = if config.zone_max_x < 500.0 {
+                    config.zone_max_x // boundary at east edge of my zone
+                } else {
+                    config.zone_min_x // boundary at west edge of my zone
+                };
+                let my_side_positive = config.zone_min_x >= boundary_x;
+                MeshDualSim::single(BoundaryAxis::X, boundary_x, my_side_positive)
+            } else {
+                MeshDualSim::default()
+            };
+
+            let config = mesh_config.as_ref().expect("MeshConfig must exist when mesh is active");
+            let controlled = MeshControlled {
+                authority_server: config.server_id,
+                zone_bounds: ZoneBounds {
+                    min_x: config.zone_min_x,
+                    min_z: -500.0,
+                    max_x: config.zone_max_x,
+                    max_z: 500.0,
+                },
+                neighbors: config.neighbors.iter().map(|n| MeshNeighborInfo {
+                    id: n.id,
+                    address: n.game_addr.to_string(),
+                    boundary: BoundaryKind::Seamless,
+                    zone_bounds: ZoneBounds {
+                        min_x: n.zone_min_x,
+                        min_z: -500.0,
+                        max_x: n.zone_max_x,
+                        max_z: 500.0,
+                    },
+                }).collect(),
+                active_connections: vec![config.server_id],
+            };
+
+            player.insert((
+                mesh_id,
+                MeshSyncSource,
+                MeshAuthority { version: 0 },
+                dual_sim,
+                controlled,
+            ));
+            info!("Player {} spawned with MeshEntityId {:?} + dual-sim + MeshControlled", client_id_bits, mesh_id);
+        }
+    }
 
     // Force-touch all existing players' Positions so lightyear sends fresh snapshots
     // to the new client. Without this, interpolated entities need 2 snapshots to render
