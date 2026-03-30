@@ -142,7 +142,7 @@ fn main() {
 
     app.add_systems(
         Update,
-        (cleanup_tracers, animate_jab, health_hud, inventory_hud, death_screen, kill_feed_ui, log_health_changes)
+        (cleanup_tracers, animate_jab, health_hud, inventory_hud, death_screen, kill_feed_ui, build_version_hud, log_health_changes)
             .run_if(in_state(AppState::InGame)),
     );
 
@@ -547,7 +547,7 @@ fn menu_ui(
             ui.painter().text(
                 egui::pos2(rect.right() - 20.0, rect.bottom() - 20.0),
                 egui::Align2::RIGHT_BOTTOM,
-                "Alpha 0.1  ·  Build 2031",
+                &format!("v{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_SHORT_HASH")),
                 chakra(11.0),
                 cream(0.2),
             );
@@ -937,6 +937,27 @@ fn inventory_hud(
                 }
             });
         });
+}
+
+/// Build version — bottom-right corner, always visible, muted gray.
+/// Version from Cargo.toml + short git commit hash baked in at compile time.
+fn build_version_hud(mut contexts: EguiContexts) {
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+    let screen = ctx.screen_rect();
+
+    let version = concat!("v", env!("CARGO_PKG_VERSION"), "-", env!("GIT_SHORT_HASH"));
+
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("build_version"),
+    ))
+    .text(
+        egui::pos2(screen.right() - 12.0, screen.bottom() - 14.0),
+        egui::Align2::RIGHT_BOTTOM,
+        version,
+        chakra(10.0),
+        egui::Color32::from_rgba_unmultiplied(180, 180, 180, 60),
+    );
 }
 
 /// Death screen overlay — shown when the controlled player has PlayerDead.
