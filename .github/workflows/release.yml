@@ -8,8 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  SCCACHE_GHA_ENABLED: true
-  RUSTC_WRAPPER: sccache
 
 jobs:
   # ============================================
@@ -58,9 +56,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -111,7 +106,7 @@ jobs:
               -e "s|<string>anima</string>|<string>anima-launcher</string>|" \
               macos/Info.plist.template > "${CONTENTS}/Info.plist"
 
-          # Icon — use pre-built .icns (generated from anima-cover.png face crop)
+          # Icon
           cp assets/AppIcon.icns "${CONTENTS}/Resources/AppIcon.icns"
 
           # Version file
@@ -127,23 +122,25 @@ jobs:
         run: |
           DMG_NAME="anima-macos-arm64-${TAG}.dmg"
           DMG_STABLE="anima-macos-arm64.dmg"
-          STAGING="dmg-staging"
 
-          mkdir -p "${STAGING}"
-          cp -r Anima.app "${STAGING}/"
+          # Create a temporary directory for DMG contents
+          mkdir -p dmg-staging
 
-          # Create symlink to /Applications for drag-and-drop install
-          ln -s /Applications "${STAGING}/Applications"
+          # Copy the app
+          cp -r Anima.app dmg-staging/
 
-          # Create DMG
+          # Create Applications symlink for drag-to-install
+          ln -s /Applications dmg-staging/Applications
+
+          # Create the DMG
           hdiutil create \
             -volname "Anima ${TAG}" \
-            -srcfolder "${STAGING}" \
+            -srcfolder dmg-staging \
             -ov \
             -format UDZO \
             "${DMG_NAME}"
 
-          # Also create stable-named copy for website download URL
+          # Stable-named copy for website
           cp "${DMG_NAME}" "${DMG_STABLE}"
 
           echo "==> Created ${DMG_NAME} ($(du -h "${DMG_NAME}" | cut -f1))"
@@ -174,9 +171,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -206,11 +200,8 @@ jobs:
           cp -r assets dist/anima/
           echo "${TAG}" > dist/anima/VERSION
 
-          # Versioned artifact
           cd dist && zip -r "../anima-linux-x64-${TAG}.zip" anima/
           cd ..
-
-          # Stable-named copy for website
           cp "anima-linux-x64-${TAG}.zip" anima-linux-x64.zip
 
       - name: Upload versioned artifact
@@ -240,9 +231,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -303,9 +291,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -376,24 +361,22 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: "Anima ${{ needs.version.outputs.tag }}"
           make_latest: true
-          generate_release_notes: true
           body: |
             ## Anima ${{ needs.version.outputs.tag }}
 
             **Version:** `${{ needs.version.outputs.version }}` | **Commit:** `${{ needs.version.outputs.short_sha }}` | **Built:** `${{ needs.version.outputs.build_date }}`
 
             ### Downloads
-            | Platform | Versioned | Stable URL |
-            |---|---|---|
-            | **macOS** (Apple Silicon) | `anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg` | `anima-macos-arm64.dmg` |
-            | **Linux** (x64) | `anima-linux-x64-${{ needs.version.outputs.tag }}.zip` | `anima-linux-x64.zip` |
-            | **Windows** (x64) | `anima-windows-x64-${{ needs.version.outputs.tag }}.zip` | `anima-windows-x64.zip` |
-            | Server (Linux x64) | `anima-linux-server-${{ needs.version.outputs.tag }}.zip` | `anima-linux-server.zip` |
+            | Platform | File |
+            |---|---|
+            | **macOS** (Apple Silicon) | `anima-macos-arm64.dmg` |
+            | **Linux** (x64) | `anima-linux-x64.zip` |
+            | **Windows** (x64) | `anima-windows-x64.zip` |
 
             **macOS:** Download the `.dmg`, open it, drag **Anima.app** to Applications.
             **Windows/Linux:** Extract the `.zip` and run `anima` (or `anima.exe`).
 
-            > Note: macOS builds are not yet code-signed. You may need to right-click → Open on first launch.
+            > Note: macOS builds are not yet code-signed. Right-click → Open on first launch.
           files: |
             artifacts/anima-macos-arm64-dmg-versioned/anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg
             artifacts/anima-macos-arm64-dmg-stable/anima-macos-arm64.dmg
