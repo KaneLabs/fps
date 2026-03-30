@@ -203,12 +203,20 @@ impl Plugin for ProtocolPlugin {
 
         // Replicated components
         app.register_component::<PlayerId>();
+        // Yaw/pitch: same treatment as Position/Rotation — predicted with rollback
+        // threshold + smooth correction. Threshold is generous (0.1 rad ~5.7°) because
+        // client and server run the same shared_look with the same input deltas, so
+        // divergence is minimal. Correction smoothing makes any correction invisible.
         app.register_component::<PlayerYaw>()
             .add_prediction()
-            .add_linear_interpolation();
+            .add_should_rollback(|a: &PlayerYaw, b: &PlayerYaw| (a.0 - b.0).abs() >= 0.1)
+            .add_linear_interpolation()
+            .enable_correction();
         app.register_component::<PlayerPitch>()
             .add_prediction()
-            .add_linear_interpolation();
+            .add_should_rollback(|a: &PlayerPitch, b: &PlayerPitch| (a.0 - b.0).abs() >= 0.1)
+            .add_linear_interpolation()
+            .enable_correction();
         app.register_component::<PlayerEquipped>()
             .add_prediction();
         app.register_component::<PlayerInventory>();

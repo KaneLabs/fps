@@ -7,8 +7,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  SCCACHE_GHA_ENABLED: true
-  RUSTC_WRAPPER: sccache
 
 jobs:
   check:
@@ -21,9 +19,6 @@ jobs:
         with:
           components: clippy
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -31,7 +26,6 @@ jobs:
           shared-key: check
           cache-targets: true
           cache-all-crates: true
-          # Save cache on PRs too so repeat pushes are fast
           save-if: true
 
       - name: Install system dependencies
@@ -44,6 +38,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib --no-fail-fast
 
       - name: Build server (release)
         run: cargo build --release --bin server

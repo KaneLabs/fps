@@ -17,7 +17,7 @@ use multiplayer::protocol::*;
 use multiplayer::world::{
     spawn_lights, spawn_world_model, update_view_model, WorldModelCamera, DEFAULT_RENDER_LAYER,
     interaction_ui_system, init_replicated_doors, init_replicated_equippables,
-    init_replicated_interactables, sync_door_state, sync_equippable_visibility,
+    init_replicated_interactables, sync_door_state, sync_equippable_position, sync_equippable_visibility,
     sync_remote_equipped, spawn_tracer, cleanup_tracers,
     start_jab_animation, animate_jab, LeftHand,
 };
@@ -134,7 +134,7 @@ fn main() {
     );
     app.add_systems(
         Update,
-        (sync_equippable_visibility, sync_remote_equipped)
+        (sync_equippable_visibility, sync_equippable_position, sync_remote_equipped)
             .run_if(in_state(AppState::InGame))
             .run_if(not(lightyear::prelude::is_in_rollback)),
     );

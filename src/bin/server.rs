@@ -178,7 +178,6 @@ fn handle_connected(
         player_replicated_bundle(client_id_bits),
         player_physics_bundle(),
         PlayerDisplayId(display_id),
-        Position(spawn_pos),
         // WalletAddress starts empty — populated after auth verification
         WalletAddress::default(),
         Replicate::to_clients(NetworkTarget::All),
@@ -188,7 +187,9 @@ fn handle_connected(
             owner: entity,
             lifetime: Default::default(),
         },
-    ));
+    ))
+    // Set spawn position after spawn — player_replicated_bundle already includes Position
+    .insert(Position(spawn_pos));
 
     info!("[SPAWN] Player {} spawning at {:?}", display_id, spawn_pos);
 

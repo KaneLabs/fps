@@ -1664,6 +1664,20 @@ pub fn sync_equippable_visibility(
     }
 }
 
+/// Client-only: syncs equippable Transform with replicated Position.
+/// Without this, dropped/death-dropped items appear at their original spawn location.
+pub fn sync_equippable_position(
+    mut query: Query<(&Position, &Rotation, &mut Transform, &Equippable), Changed<Position>>,
+) {
+    for (pos, rot, mut transform, equippable) in query.iter_mut() {
+        transform.translation = pos.0;
+        transform.rotation = rot.0;
+        // Preserve scale
+        let scale = equippable.scale;
+        transform.scale = Vec3::splat(scale);
+    }
+}
+
 /// Client-only: syncs door visual state when DoorState changes via replication.
 pub fn sync_door_state(
     mut door_query: Query<(Entity, &DoorState), Changed<DoorState>>,
