@@ -7,6 +7,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: true
+  RUSTC_WRAPPER: sccache
 
 jobs:
   check:
@@ -19,15 +21,18 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ci-check-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ci-check-
+          prefix-key: ci
+          shared-key: check
+          cache-targets: true
+          cache-all-crates: true
+          # Save cache on PRs too so repeat pushes are fast
+          save-if: true
 
       - name: Install system dependencies
         run: |

@@ -8,12 +8,48 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: true
+  RUSTC_WRAPPER: sccache
 
 jobs:
+  # ============================================
+  # Compute version tag once, share across jobs
+  # ============================================
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      short_sha: ${{ steps.tag.outputs.short_sha }}
+      build_date: ${{ steps.tag.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: tag
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v${VERSION}-${SHORT_SHA}"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Release tag: ${TAG} | Version: ${VERSION} | SHA: ${SHORT_SHA}"
+
   # ============================================
   # macOS arm64 client
   # ============================================
   build-macos-client:
+    needs: [version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,24 +59,31 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: client-macos-arm64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: client-macos-arm64-
+          prefix-key: release
+          shared-key: macos-arm64-client
+          cache-targets: true
+          cache-all-crates: true
 
       - name: Build client
+        env:
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: cargo build --release --bin client --target aarch64-apple-darwin
 
       - name: Package
         run: |
+          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist/anima
           cp target/aarch64-apple-darwin/release/client dist/anima/anima
           cp -r assets dist/anima/
+          echo "${TAG}" > dist/anima/VERSION
           cd dist && zip -r ../anima-macos-arm64.zip anima/
 
       - name: Upload artifact
@@ -48,11 +91,13 @@ jobs:
         with:
           name: anima-macos-arm64
           path: anima-macos-arm64.zip
+          retention-days: 30
 
   # ============================================
   # Linux x64 client
   # ============================================
   build-linux-client:
+    needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,15 +105,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: client-linux-x64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: client-linux-x64-
+          prefix-key: release
+          shared-key: linux-x64-client
+          cache-targets: true
+          cache-all-crates: true
 
       - name: Install system dependencies
         run: |
@@ -76,13 +122,19 @@ jobs:
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libvulkan-dev
 
       - name: Build client
+        env:
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: cargo build --release --bin client
 
       - name: Package
         run: |
+          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist/anima
           cp target/release/client dist/anima/anima
           cp -r assets dist/anima/
+          echo "${TAG}" > dist/anima/VERSION
           cd dist && zip -r ../anima-linux-x64.zip anima/
 
       - name: Upload artifact
@@ -90,11 +142,13 @@ jobs:
         with:
           name: anima-linux-x64
           path: anima-linux-x64.zip
+          retention-days: 30
 
   # ============================================
   # Windows x64 client (cross-compile from Linux)
   # ============================================
   build-windows-client:
+    needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,15 +158,16 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: client-windows-x64-cross-${{ hashFiles('Cargo.lock') }}
-          restore-keys: client-windows-x64-cross-
+          prefix-key: release
+          shared-key: windows-x64-client
+          cache-targets: true
+          cache-all-crates: true
 
       - name: Install cross-compilation toolchain
         run: |
@@ -122,13 +177,18 @@ jobs:
       - name: Build client
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: cargo build --release --bin client --target x86_64-pc-windows-gnu
 
       - name: Package
         run: |
+          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist/anima
           cp target/x86_64-pc-windows-gnu/release/client.exe dist/anima/anima.exe
           cp -r assets dist/anima/
+          echo "${TAG}" > dist/anima/VERSION
           cd dist && zip -r ../anima-windows-x64.zip anima/
 
       - name: Upload artifact
@@ -136,11 +196,13 @@ jobs:
         with:
           name: anima-windows-x64
           path: anima-windows-x64.zip
+          retention-days: 30
 
   # ============================================
   # Linux x64 server (headless)
   # ============================================
   build-linux-server:
+    needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -148,15 +210,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # Server and Linux client share the same target triple — reuse compiled deps
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: server-linux-x64-${{ hashFiles('Cargo.lock') }}
-          restore-keys: server-linux-x64-
+          prefix-key: release
+          shared-key: linux-x64-server
+          cache-targets: true
+          cache-all-crates: true
 
       - name: Install system dependencies
         run: |
@@ -164,47 +228,36 @@ jobs:
           sudo apt-get install -y libasound2-dev libudev-dev
 
       - name: Build server
+        env:
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: cargo build --release --bin server
 
       - name: Package
         run: |
+          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist
           cp target/release/server dist/anima-server
-          cd dist && zip -r ../anima-linux-server.zip anima-server
+          echo "${TAG}" > dist/VERSION
+          cd dist && zip -r ../anima-linux-server.zip anima-server VERSION
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: anima-linux-server
           path: anima-linux-server.zip
+          retention-days: 30
 
   # ============================================
   # Create GitHub Release with all artifacts
   # ============================================
   release:
-    needs: [build-macos-client, build-linux-client, build-windows-client, build-linux-server]
+    needs: [version, build-macos-client, build-linux-client, build-windows-client, build-linux-server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine release tag
-        id: tag
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            TAG="v${VERSION}-${SHORT_SHA}"
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -213,11 +266,22 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Anima ${{ steps.tag.outputs.tag }}"
-          generate_release_notes: true
-          prerelease: ${{ steps.tag.outputs.prerelease }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "Anima ${{ needs.version.outputs.tag }}"
           make_latest: true
+          generate_release_notes: true
+          body: |
+            ## Anima ${{ needs.version.outputs.tag }}
+
+            **Version:** `${{ needs.version.outputs.version }}` | **Commit:** `${{ needs.version.outputs.short_sha }}` | **Built:** `${{ needs.version.outputs.build_date }}`
+
+            ### Downloads
+            | Platform | File |
+            |---|---|
+            | macOS (Apple Silicon) | `anima-macos-arm64.zip` |
+            | Linux (x64) | `anima-linux-x64.zip` |
+            | Windows (x64) | `anima-windows-x64.zip` |
+            | Server (Linux x64) | `anima-linux-server.zip` |
           files: |
             artifacts/anima-macos-arm64/anima-macos-arm64.zip
             artifacts/anima-linux-x64/anima-linux-x64.zip
@@ -228,9 +292,8 @@ jobs:
   # Deploy server binary to Salt Lake City box
   # ============================================
   deploy-server:
-    needs: [release]
+    needs: [version, release]
     runs-on: ubuntu-latest
-    # Only deploy from master branch pushes (not PRs, not tag-only)
     if: github.ref == 'refs/heads/master'
     environment: production
     steps:
@@ -245,7 +308,8 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_TAG: ${{ needs.version.outputs.tag }}
         run: |
           # Write SSH key
           mkdir -p ~/.ssh
@@ -258,13 +322,13 @@ jobs:
           scp $SSH_OPTS anima-linux-server.zip "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/anima-linux-server.zip"
 
           # Run deploy script on server
-          ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" 'bash -s' << 'DEPLOY_SCRIPT'
+          ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" "DEPLOY_TAG=${DEPLOY_TAG}" 'bash -s' << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
             INSTALL_DIR="/opt/anima"
             SERVICE_NAME="anima-server"
 
-            echo "==> Extracting new server binary..."
+            echo "==> Deploying ${DEPLOY_TAG}..."
             cd /tmp
             unzip -o anima-linux-server.zip
             chmod +x anima-server
@@ -276,6 +340,7 @@ jobs:
             sudo mkdir -p ${INSTALL_DIR}
             sudo mv anima-server ${INSTALL_DIR}/anima-server
             sudo chown root:root ${INSTALL_DIR}/anima-server
+            echo "${DEPLOY_TAG}" | sudo tee ${INSTALL_DIR}/VERSION > /dev/null
 
             echo "==> Starting ${SERVICE_NAME}..."
             sudo systemctl start ${SERVICE_NAME}
@@ -283,15 +348,14 @@ jobs:
             echo "==> Verifying..."
             sleep 2
             if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
-              echo "==> Deploy successful! Server is running."
+              echo "==> Deploy successful! ${DEPLOY_TAG} is running."
             else
               echo "==> ERROR: Server failed to start!"
               sudo journalctl -u ${SERVICE_NAME} --no-pager -n 20
               exit 1
             fi
 
-            # Cleanup
-            rm -f /tmp/anima-linux-server.zip
+            rm -f /tmp/anima-linux-server.zip /tmp/VERSION
           DEPLOY_SCRIPT
 
       - name: Cleanup SSH key

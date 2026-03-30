@@ -18,6 +18,13 @@ use avian3d::prelude::Position;
 const RESPAWN_DELAY: f32 = 20.0;
 
 fn main() {
+    eprintln!(
+        "Anima Server {} (commit {} built {})",
+        env!("ANIMA_VERSION"),
+        env!("ANIMA_BUILD_SHA"),
+        env!("ANIMA_BUILD_DATE"),
+    );
+
     let mut app = App::new();
 
     // Headless server: no window

@@ -66,6 +66,13 @@ struct LineGradient(Handle<Image>);
 struct MenuSelection(usize);
 
 fn main() {
+    eprintln!(
+        "Anima Client {} (commit {} built {})",
+        env!("ANIMA_VERSION"),
+        env!("ANIMA_BUILD_SHA"),
+        env!("ANIMA_BUILD_DATE"),
+    );
+
     // Load or generate persistent Ed25519 keypair (~/.anima/keypair.json)
     let identity = multiplayer::auth::ClientIdentity::load_or_create();
     info!("Client identity: {} (id={})", identity.address, identity.client_id);
@@ -76,7 +83,7 @@ fn main() {
         ..default()
     }).set(WindowPlugin {
         primary_window: Some(Window {
-            title: format!("ANIMA — {}", &identity.address[..8]),
+            title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
             ..default()
         }),
         ..default()
