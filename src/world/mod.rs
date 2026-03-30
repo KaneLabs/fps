@@ -298,326 +298,1167 @@ const DOOR_INTERACT_DISTANCE: f32 = 4.0;
 
 /// Server-only: spawns physics colliders for all static world geometry.
 /// No meshes, materials, or render layers — headless server doesn't render.
+///
+/// MAP: Abandoned cabin compound in post-apocalyptic Colorado wilderness, 2031.
+/// Layout (~80x80m playable area):
+///   - Central clearing with main cabin + porch
+///   - Equipment shed to the west
+///   - Mine entrance carved into eastern hillside
+///   - Scattered supply crates, logs, rocky outcrops
+///   - Uneven terrain with elevation changes
+///   - Pine tree trunks throughout the perimeter
 pub fn spawn_world_physics(mut commands: Commands) {
-    // Floor
-    commands.spawn((
-        Transform::from_xyz(0.0, 0.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(100.0, 0.1, 100.0),
-        Friction::new(0.0),
-    ));
+    // Helper for static collider spawning
+    let sc = |commands: &mut Commands, pos: Vec3, size: Vec3, friction: f32| {
+        commands.spawn((
+            Transform::from_translation(pos),
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(friction),
+        ));
+    };
+    let sc_rot = |commands: &mut Commands, pos: Vec3, rot: Quat, size: Vec3, friction: f32| {
+        commands.spawn((
+            Transform::from_translation(pos).with_rotation(rot),
+            RigidBody::Static,
+            Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(friction),
+        ));
+    };
 
-    // West wall
-    commands.spawn((Transform::from_xyz(-5.0, 2.0, 0.0), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // East wall
-    commands.spawn((Transform::from_xyz(5.0, 2.0, 0.0), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // South wall
-    commands.spawn((Transform::from_xyz(0.0, 2.0, 5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 10.0), Friction::new(0.0)));
-    // North wall left
-    commands.spawn((Transform::from_xyz(-3.25, 2.0, -5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
-    // North wall right
-    commands.spawn((Transform::from_xyz(3.25, 2.0, -5.0).with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)), RigidBody::Static, Collider::cuboid(0.5, 4.0, 3.5), Friction::new(0.0)));
+    // ========================================
+    // TERRAIN — multi-level ground with rocky terrain
+    // ========================================
 
-    // Table
-    commands.spawn((Transform::from_xyz(0.0, 0.0, -3.0), RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.0), Friction::new(0.0)));
+    // Main ground plane (slightly below 0 so terrain sits on top)
+    sc(&mut commands, Vec3::new(0.0, -0.05, -20.0), Vec3::new(120.0, 0.1, 120.0), 0.5);
 
-    // Staircase
-    for i in 0..6 {
-        let h = 0.5 * (i as f32 + 1.0);
-        commands.spawn((Transform::from_xyz(-6.0, h / 2.0, -8.0 - i as f32 * 1.5), RigidBody::Static, Collider::cuboid(2.0, h, 1.5), Friction::new(0.0)));
+    // Dirt clearing around cabin (slightly raised, packed earth)
+    sc(&mut commands, Vec3::new(0.0, 0.05, 0.0), Vec3::new(20.0, 0.1, 16.0), 0.4);
+
+    // Eastern hillside (stepped terrain rising toward mine)
+    sc(&mut commands, Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0), 0.6);
+    sc(&mut commands, Vec3::new(24.0, 1.5, -8.0), Vec3::new(8.0, 3.0, 18.0), 0.6);
+    sc(&mut commands, Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0), 0.6);
+
+    // Western ridge (gentle slope)
+    sc(&mut commands, Vec3::new(-20.0, 0.3, -10.0), Vec3::new(10.0, 0.6, 24.0), 0.5);
+    sc(&mut commands, Vec3::new(-26.0, 0.8, -10.0), Vec3::new(6.0, 1.6, 20.0), 0.5);
+
+    // Northern rocky slope
+    sc(&mut commands, Vec3::new(0.0, 0.4, -28.0), Vec3::new(30.0, 0.8, 10.0), 0.6);
+    sc(&mut commands, Vec3::new(0.0, 1.2, -35.0), Vec3::new(25.0, 2.4, 8.0), 0.6);
+
+    // Southern approach path (trail from the south)
+    sc(&mut commands, Vec3::new(0.0, 0.02, 14.0), Vec3::new(4.0, 0.04, 12.0), 0.3);
+
+    // ========================================
+    // MAIN CABIN — log cabin, 8x6m, with porch
+    // ========================================
+
+    // Cabin floor (raised wooden platform)
+    sc(&mut commands, Vec3::new(0.0, 0.3, 0.0), Vec3::new(8.0, 0.2, 6.0), 0.3);
+
+    // Cabin walls — west
+    sc(&mut commands, Vec3::new(-4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
+    // Cabin walls — east
+    sc(&mut commands, Vec3::new(4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
+    // Cabin walls — north (solid back wall)
+    sc_rot(&mut commands, Vec3::new(0.0, 1.7, -3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 8.0), 0.2);
+    // Cabin walls — south left (doorway gap 2.5m wide)
+    sc_rot(&mut commands, Vec3::new(-2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
+    // Cabin walls — south right
+    sc_rot(&mut commands, Vec3::new(2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
+
+    // Cabin roof (angled planks — simplified as flat slab)
+    sc(&mut commands, Vec3::new(0.0, 3.3, 0.0), Vec3::new(9.0, 0.2, 7.0), 0.2);
+
+    // Front porch (extends south from cabin door)
+    sc(&mut commands, Vec3::new(0.0, 0.2, 5.5), Vec3::new(8.0, 0.15, 3.0), 0.3);
+
+    // Porch railing — left
+    sc(&mut commands, Vec3::new(-3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
+    // Porch railing — right
+    sc(&mut commands, Vec3::new(3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
+    // Porch railing — front
+    sc_rot(&mut commands, Vec3::new(0.0, 0.7, 7.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.2, 0.8, 8.0), 0.2);
+
+    // Porch steps (2 steps down to ground)
+    sc(&mut commands, Vec3::new(0.0, 0.12, 7.5), Vec3::new(2.0, 0.12, 0.6), 0.3);
+    sc(&mut commands, Vec3::new(0.0, 0.06, 8.0), Vec3::new(2.0, 0.06, 0.6), 0.3);
+
+    // Table inside cabin
+    sc(&mut commands, Vec3::new(0.0, 0.4, -1.0), Vec3::new(2.0, 0.8, 1.2), 0.2);
+
+    // Fireplace / hearth on north wall (stone block)
+    sc(&mut commands, Vec3::new(0.0, 0.5, -2.5), Vec3::new(2.0, 1.0, 1.0), 0.4);
+    // Chimney above fireplace
+    sc(&mut commands, Vec3::new(0.0, 3.0, -2.8), Vec3::new(1.2, 3.0, 1.2), 0.4);
+
+    // ========================================
+    // EQUIPMENT SHED — west of cabin, smaller structure
+    // ========================================
+
+    // Shed floor
+    sc(&mut commands, Vec3::new(-14.0, 0.15, 2.0), Vec3::new(5.0, 0.15, 4.0), 0.3);
+
+    // Shed walls — west
+    sc(&mut commands, Vec3::new(-16.5, 1.2, 2.0), Vec3::new(0.3, 2.4, 4.0), 0.2);
+    // Shed walls — east (open side — just posts)
+    sc(&mut commands, Vec3::new(-11.5, 1.2, 4.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
+    sc(&mut commands, Vec3::new(-11.5, 1.2, 0.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
+    // Shed walls — north
+    sc_rot(&mut commands, Vec3::new(-14.0, 1.2, 0.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 5.0), 0.2);
+    // Shed walls — south (with gap)
+    sc_rot(&mut commands, Vec3::new(-15.0, 1.2, 4.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 2.0), 0.2);
+
+    // Shed roof (corrugated metal look — flat collider)
+    sc(&mut commands, Vec3::new(-14.0, 2.5, 2.0), Vec3::new(6.0, 0.1, 5.0), 0.2);
+
+    // Workbench inside shed
+    sc(&mut commands, Vec3::new(-15.0, 0.4, 1.5), Vec3::new(2.5, 0.8, 0.8), 0.2);
+
+    // ========================================
+    // MINE ENTRANCE — carved into eastern hillside
+    // ========================================
+
+    // Mine tunnel floor (descending slightly into the hill)
+    sc(&mut commands, Vec3::new(22.0, 0.8, -6.0), Vec3::new(3.0, 0.1, 8.0), 0.4);
+
+    // Mine tunnel left wall
+    sc(&mut commands, Vec3::new(20.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0), 0.3);
+    // Mine tunnel right wall
+    sc(&mut commands, Vec3::new(23.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0), 0.3);
+    // Mine tunnel ceiling
+    sc(&mut commands, Vec3::new(22.0, 3.2, -6.0), Vec3::new(3.0, 0.3, 8.0), 0.3);
+
+    // Mine support beams (timber frames at intervals)
+    for z_off in [-3.0, -6.0, -9.0] {
+        // Left post
+        sc(&mut commands, Vec3::new(20.8, 1.8, z_off), Vec3::new(0.25, 2.0, 0.25), 0.2);
+        // Right post
+        sc(&mut commands, Vec3::new(23.2, 1.8, z_off), Vec3::new(0.25, 2.0, 0.25), 0.2);
+        // Cross beam
+        sc(&mut commands, Vec3::new(22.0, 3.0, z_off), Vec3::new(2.8, 0.25, 0.25), 0.2);
     }
 
-    // Ramp
-    commands.spawn((Transform::from_xyz(6.0, 1.5, -12.0).with_rotation(Quat::from_rotation_x(-0.25)), RigidBody::Static, Collider::cuboid(3.0, 0.2, 8.0), Friction::new(0.8)));
+    // Mine entrance overhang (rock face)
+    sc(&mut commands, Vec3::new(22.0, 3.5, -2.0), Vec3::new(5.0, 1.0, 2.0), 0.5);
 
-    // Platforms
-    commands.spawn((Transform::from_xyz(0.0, 0.5, -9.0), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
-    commands.spawn((Transform::from_xyz(0.0, 0.5, -15.0), RigidBody::Static, Collider::cuboid(3.0, 1.0, 3.0), Friction::new(0.0)));
+    // ========================================
+    // SUPPLY CRATES & BARRELS — scattered around compound
+    // ========================================
 
-    // Stepping stones
-    for (pos, _) in [
-        (Vec3::new(0.0, 1.0, -20.0), 0), (Vec3::new(2.0, 1.5, -22.0), 0),
-        (Vec3::new(-1.0, 2.0, -24.0), 0), (Vec3::new(1.5, 2.5, -26.0), 0),
-        (Vec3::new(-0.5, 3.0, -28.0), 0),
-    ] {
-        commands.spawn((Transform::from_translation(pos), RigidBody::Static, Collider::cuboid(1.5, 0.3, 1.5), Friction::new(0.0)));
+    // Crate stack near shed
+    sc(&mut commands, Vec3::new(-12.0, 0.4, 4.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
+    sc(&mut commands, Vec3::new(-12.0, 1.0, 4.0), Vec3::new(0.8, 0.4, 0.8), 0.3);
+    sc(&mut commands, Vec3::new(-11.0, 0.3, 3.5), Vec3::new(0.6, 0.6, 0.6), 0.3);
+
+    // Crates near cabin porch
+    sc(&mut commands, Vec3::new(5.5, 0.35, 6.0), Vec3::new(1.2, 0.7, 0.8), 0.3);
+    sc(&mut commands, Vec3::new(6.5, 0.25, 5.5), Vec3::new(0.5, 0.5, 0.5), 0.3);
+
+    // Barrel cluster south of cabin
+    sc(&mut commands, Vec3::new(-3.0, 0.5, 8.0), Vec3::new(0.7, 1.0, 0.7), 0.3);
+    sc(&mut commands, Vec3::new(-2.0, 0.5, 8.5), Vec3::new(0.7, 1.0, 0.7), 0.3);
+    sc(&mut commands, Vec3::new(-2.5, 0.5, 9.2), Vec3::new(0.7, 1.0, 0.7), 0.3);
+
+    // Crate near mine entrance
+    sc(&mut commands, Vec3::new(19.5, 1.2, -3.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
+
+    // ========================================
+    // ROCKY OUTCROPS & BOULDERS
+    // ========================================
+
+    // Large boulder cluster — northwest
+    sc(&mut commands, Vec3::new(-10.0, 0.7, -15.0), Vec3::new(3.0, 1.4, 2.5), 0.7);
+    sc(&mut commands, Vec3::new(-8.5, 0.4, -13.5), Vec3::new(1.8, 0.8, 1.5), 0.7);
+    sc_rot(&mut commands, Vec3::new(-11.5, 0.5, -14.0), Quat::from_rotation_y(0.4), Vec3::new(2.0, 1.0, 1.5), 0.7);
+
+    // Rocky ridge — northeast (natural cover)
+    sc_rot(&mut commands, Vec3::new(12.0, 0.6, -16.0), Quat::from_rotation_y(0.3), Vec3::new(4.0, 1.2, 1.5), 0.7);
+    sc(&mut commands, Vec3::new(14.0, 0.4, -14.0), Vec3::new(2.0, 0.8, 2.0), 0.7);
+    sc_rot(&mut commands, Vec3::new(10.0, 0.3, -18.0), Quat::from_rotation_y(-0.2), Vec3::new(2.5, 0.6, 1.5), 0.7);
+
+    // Scattered mid-field boulders (cover points)
+    sc_rot(&mut commands, Vec3::new(7.0, 0.45, -5.0), Quat::from_rotation_y(0.7), Vec3::new(1.8, 0.9, 1.2), 0.7);
+    sc(&mut commands, Vec3::new(-6.0, 0.35, -8.0), Vec3::new(1.5, 0.7, 1.5), 0.7);
+    sc_rot(&mut commands, Vec3::new(3.0, 0.3, -20.0), Quat::from_rotation_y(1.1), Vec3::new(2.0, 0.6, 1.0), 0.7);
+
+    // ========================================
+    // FALLEN LOGS (natural cover & obstacles)
+    // ========================================
+
+    sc_rot(&mut commands, Vec3::new(-5.0, 0.25, -12.0), Quat::from_rotation_y(0.6), Vec3::new(0.4, 0.4, 5.0), 0.4);
+    sc_rot(&mut commands, Vec3::new(8.0, 0.3, -22.0), Quat::from_rotation_y(-0.8), Vec3::new(0.5, 0.5, 6.0), 0.4);
+    sc_rot(&mut commands, Vec3::new(-8.0, 0.2, 5.0), Quat::from_rotation_y(1.2), Vec3::new(0.35, 0.35, 4.0), 0.4);
+
+    // ========================================
+    // PINE TREE TRUNKS (collision cylinders approximated as cuboids)
+    // ========================================
+
+    let tree_positions = [
+        Vec3::new(-18.0, 2.0, -18.0), Vec3::new(-15.0, 2.0, -22.0),
+        Vec3::new(-20.0, 2.0, -5.0),  Vec3::new(-22.0, 2.0, 5.0),
+        Vec3::new(-17.0, 2.0, 10.0),  Vec3::new(-12.0, 2.0, -20.0),
+        Vec3::new(15.0, 2.0, -24.0),  Vec3::new(18.0, 2.0, -20.0),
+        Vec3::new(10.0, 2.0, 8.0),    Vec3::new(14.0, 2.0, 5.0),
+        Vec3::new(-5.0, 2.0, -25.0),  Vec3::new(5.0, 2.0, -28.0),
+        Vec3::new(-25.0, 2.0, -15.0), Vec3::new(20.0, 2.0, 3.0),
+        Vec3::new(-8.0, 2.0, 12.0),   Vec3::new(8.0, 2.0, 14.0),
+        Vec3::new(0.0, 2.0, -32.0),   Vec3::new(-14.0, 2.0, -28.0),
+    ];
+
+    for pos in tree_positions {
+        sc(&mut commands, pos, Vec3::new(0.6, 4.0, 0.6), 0.3);
     }
 
-    // Pillars
-    commands.spawn((Transform::from_xyz(-6.0, 3.0, -20.0), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
-    commands.spawn((Transform::from_xyz(-6.0, 3.0, -24.0), RigidBody::Static, Collider::cuboid(1.5, 6.0, 1.5), Friction::new(0.0)));
+    // ========================================
+    // WATCHTOWER — elevated platform NW of cabin
+    // ========================================
 
-    // Low wall
-    commands.spawn((Transform::from_xyz(6.0, 0.6, -18.0), RigidBody::Static, Collider::cuboid(6.0, 1.2, 0.5), Friction::new(0.0)));
+    // Four posts
+    for (x, z) in [(-9.0, -6.0), (-9.0, -9.0), (-6.0, -6.0), (-6.0, -9.0)] {
+        sc(&mut commands, Vec3::new(x, 2.0, z), Vec3::new(0.3, 4.0, 0.3), 0.3);
+    }
+    // Platform
+    sc(&mut commands, Vec3::new(-7.5, 3.8, -7.5), Vec3::new(4.0, 0.2, 4.0), 0.3);
+    // Ladder (angled plank)
+    sc_rot(&mut commands, Vec3::new(-5.5, 1.9, -7.5), Quat::from_rotation_z(0.5), Vec3::new(0.5, 0.15, 1.0), 0.4);
 
-    // Elevated walkway
-    commands.spawn((Transform::from_xyz(10.0, 2.0, -16.0), RigidBody::Static, Collider::cuboid(2.0, 0.3, 12.0), Friction::new(0.0)));
+    // Half-walls on watchtower (cover)
+    sc(&mut commands, Vec3::new(-9.2, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
+    sc(&mut commands, Vec3::new(-5.8, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
+    sc_rot(&mut commands, Vec3::new(-7.5, 4.4, -9.2), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.15, 1.0, 4.0), 0.2);
 
-    info!("Server: spawned world physics colliders");
+    // ========================================
+    // OLD PICKUP TRUCK (rusted, south-east of cabin)
+    // ========================================
+
+    // Truck body
+    sc_rot(&mut commands, Vec3::new(10.0, 0.6, 3.0), Quat::from_rotation_y(0.3), Vec3::new(2.5, 1.2, 5.0), 0.3);
+    // Truck cab (raised section)
+    sc_rot(&mut commands, Vec3::new(10.0, 1.5, 1.5), Quat::from_rotation_y(0.3), Vec3::new(2.3, 1.0, 2.5), 0.3);
+
+    // ========================================
+    // CAMPFIRE RING — south of cabin (social area)
+    // ========================================
+
+    // Stone ring (8 small blocks in a circle)
+    let ring_center = Vec3::new(3.0, 0.0, 10.0);
+    for i in 0..8 {
+        let angle = i as f32 * std::f32::consts::TAU / 8.0;
+        let r = 1.2;
+        let x = ring_center.x + angle.cos() * r;
+        let z = ring_center.z + angle.sin() * r;
+        sc(&mut commands, Vec3::new(x, 0.15, z), Vec3::new(0.4, 0.3, 0.4), 0.7);
+    }
+
+    // Log seats around campfire
+    sc_rot(&mut commands, Vec3::new(1.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
+    sc_rot(&mut commands, Vec3::new(5.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
+    sc_rot(&mut commands, Vec3::new(3.0, 0.2, 12.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 0.3, 1.8), 0.4);
+
+    info!("Server: spawned Colorado wilderness compound physics colliders");
 }
 
 /// Client-only: spawns static world geometry with rendering + physics.
 /// Interactive objects (door, pickaxe, ore) are server-spawned replicated entities.
+///
+/// MAP: Abandoned cabin compound — Colorado wilderness, 2031.
 pub fn spawn_world_model(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let white = materials.add(Color::WHITE);
-    let gray = materials.add(Color::srgb(0.5, 0.5, 0.5));
-    let dark_gray = materials.add(Color::srgb(0.3, 0.3, 0.3));
-    let wood = materials.add(Color::from(tailwind::AMBER_700));
-    let green = materials.add(Color::from(tailwind::GREEN_600));
-    let blue = materials.add(Color::from(tailwind::BLUE_400));
-    let red = materials.add(Color::from(tailwind::RED_500));
-    let yellow = materials.add(Color::from(tailwind::YELLOW_400));
+    // ========================================
+    // MATERIAL PALETTE — post-apocalyptic Colorado
+    // ========================================
+    let dirt = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.38, 0.30, 0.20),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let dirt_light = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.36, 0.25),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let grass = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.35, 0.15),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let dead_grass = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.40, 0.22),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let log_wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.35, 0.22, 0.12),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let plank_wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.50, 0.35, 0.20),
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let aged_wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.40, 0.30, 0.18),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let stone_gray = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.43, 0.40),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let stone_dark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.28, 0.26),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let rock_red = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.32, 0.25),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let rusted_metal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.45, 0.28, 0.18),
+        perceptual_roughness: 0.7,
+        metallic: 0.3,
+        ..default()
+    });
+    let corrugated_metal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.38, 0.36, 0.34),
+        perceptual_roughness: 0.6,
+        metallic: 0.5,
+        ..default()
+    });
+    let pine_bark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.28, 0.18, 0.10),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let pine_green = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.12, 0.28, 0.10),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let pine_green_dark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.20, 0.07),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let crate_wood = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.55, 0.40, 0.25),
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let barrel_metal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.32, 0.28),
+        perceptual_roughness: 0.65,
+        metallic: 0.4,
+        ..default()
+    });
+    let fireplace_stone = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.35, 0.30, 0.28),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let chimney_stone = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.32, 0.28, 0.25),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let mine_rock = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.22, 0.20),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let mine_timber = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.42, 0.28, 0.15),
+        perceptual_roughness: 0.85,
+        ..default()
+    });
+    let embers = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.15, 0.08, 0.05),
+        emissive: bevy::color::LinearRgba::new(2.0, 0.4, 0.1, 1.0),
+        ..default()
+    });
+
+    // Helper: spawn a static block with mesh + collider + render layer
+    let rl = RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]);
 
     // ========================================
-    // FLOOR — large ground plane covering room + gym
-    // ========================================
-    let floor = meshes.add(Plane3d::new(Vec3::Y, Vec2::new(50.0, 50.0)));
-    commands.spawn((
-        Mesh3d(floor),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(0.0, 0.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(100.0, 0.1, 100.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // ========================================
-    // STARTING ROOM — 10x10, walls with door gap in north wall
-    // (Door is a server-spawned replicated entity)
-    // ========================================
-    let wall = meshes.add(Cuboid::new(0.5, 4.0, 10.0));
-    let half_wall = meshes.add(Cuboid::new(0.5, 4.0, 3.5));
-
-    // West wall (x = -5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(-5.0, 2.0, 0.0),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // East wall (x = 5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(5.0, 2.0, 0.0),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // South wall (z = 5)
-    commands.spawn((
-        Mesh3d(wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(0.0, 2.0, 5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 10.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // North wall — split into two halves with a 3-unit door gap in the center
-    // Left half (x = -5 to x = -1.5)
-    commands.spawn((
-        Mesh3d(half_wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(-3.25, 2.0, -5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 3.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-    // Right half (x = 1.5 to x = 5)
-    commands.spawn((
-        Mesh3d(half_wall.clone()),
-        MeshMaterial3d(white.clone()),
-        Transform::from_xyz(3.25, 2.0, -5.0)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        RigidBody::Static,
-        Collider::cuboid(0.5, 4.0, 3.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // Table in room
-    let table_size = Vec3::new(2.0, 1.0, 1.0);
-    let table = meshes.add(Cuboid::new(table_size.x, table_size.y, table_size.z));
-    commands.spawn((
-        Mesh3d(table),
-        MeshMaterial3d(wood.clone()),
-        Transform::from_xyz(0.0, 0.0, -3.0),
-        RigidBody::Static,
-        Collider::cuboid(table_size.x, table_size.y, table_size.z),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-    ));
-
-    // ========================================
-    // PHYSICS GYM — north of the room (z < -6)
+    // TERRAIN — Colorado wilderness ground
     // ========================================
 
-    // --- Staircase (ascending blocks, left side) ---
-    for i in 0..6 {
-        let step_height = 0.5 * (i as f32 + 1.0);
-        let step = meshes.add(Cuboid::new(2.0, step_height, 1.5));
+    // Main ground plane — dead grass / dirt mix
+    let floor_mesh = meshes.add(Plane3d::new(Vec3::Y, Vec2::new(60.0, 60.0)));
+    commands.spawn((
+        Mesh3d(floor_mesh),
+        MeshMaterial3d(dead_grass.clone()),
+        Transform::from_xyz(0.0, -0.05, -20.0),
+        RigidBody::Static,
+        Collider::cuboid(120.0, 0.1, 120.0),
+        Friction::new(0.5),
+        rl.clone(),
+        Name::new("Ground"),
+    ));
+
+    // Packed dirt clearing around cabin
+    let clearing = meshes.add(Cuboid::new(20.0, 0.1, 16.0));
+    commands.spawn((
+        Mesh3d(clearing),
+        MeshMaterial3d(dirt.clone()),
+        Transform::from_xyz(0.0, 0.05, 0.0),
+        RigidBody::Static,
+        Collider::cuboid(20.0, 0.1, 16.0),
+        Friction::new(0.4),
+        rl.clone(),
+        Name::new("Clearing"),
+    ));
+
+    // Eastern hillside (stepped terrain rising toward mine)
+    let hill_meshes = [
+        (Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0)),
+        (Vec3::new(24.0, 1.5, -8.0), Vec3::new(8.0, 3.0, 18.0)),
+        (Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0)),
+    ];
+    for (pos, size) in hill_meshes {
+        let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
         commands.spawn((
-            Mesh3d(step),
-            MeshMaterial3d(gray.clone()),
-            Transform::from_xyz(-6.0, step_height / 2.0, -8.0 - i as f32 * 1.5),
-            RigidBody::Static,
-            Collider::cuboid(2.0, step_height, 1.5),
-            Friction::new(0.0),
-            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-            Name::new(format!("Stair {}", i + 1)),
+            Mesh3d(m), MeshMaterial3d(grass.clone()),
+            Transform::from_translation(pos),
+            RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(0.6), rl.clone(),
         ));
     }
 
-    // --- Ramp (right side) ---
-    let ramp = meshes.add(Cuboid::new(3.0, 0.2, 8.0));
+    // Western ridge
+    for (pos, size) in [
+        (Vec3::new(-20.0, 0.3, -10.0), Vec3::new(10.0, 0.6, 24.0)),
+        (Vec3::new(-26.0, 0.8, -10.0), Vec3::new(6.0, 1.6, 20.0)),
+    ] {
+        let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
+        commands.spawn((
+            Mesh3d(m), MeshMaterial3d(grass.clone()),
+            Transform::from_translation(pos),
+            RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(0.5), rl.clone(),
+        ));
+    }
+
+    // Northern rocky slope
+    for (pos, size) in [
+        (Vec3::new(0.0, 0.4, -28.0), Vec3::new(30.0, 0.8, 10.0)),
+        (Vec3::new(0.0, 1.2, -35.0), Vec3::new(25.0, 2.4, 8.0)),
+    ] {
+        let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
+        commands.spawn((
+            Mesh3d(m), MeshMaterial3d(rock_red.clone()),
+            Transform::from_translation(pos),
+            RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(0.6), rl.clone(),
+        ));
+    }
+
+    // Southern approach (worn trail)
+    let trail = meshes.add(Cuboid::new(4.0, 0.04, 12.0));
     commands.spawn((
-        Mesh3d(ramp),
-        MeshMaterial3d(green.clone()),
-        Transform::from_xyz(6.0, 1.5, -12.0)
-            .with_rotation(Quat::from_rotation_x(-0.25)), // ~14 degree incline
-        RigidBody::Static,
-        Collider::cuboid(3.0, 0.2, 8.0),
-        Friction::new(0.8),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Ramp"),
+        Mesh3d(trail), MeshMaterial3d(dirt_light.clone()),
+        Transform::from_xyz(0.0, 0.02, 14.0),
+        RigidBody::Static, Collider::cuboid(4.0, 0.04, 12.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Trail"),
     ));
 
-    // --- Jump gap (center) — two platforms with a gap ---
-    let platform = meshes.add(Cuboid::new(3.0, 1.0, 3.0));
+    // ========================================
+    // MAIN CABIN — weathered log cabin with porch
+    // ========================================
 
-    // Near platform
+    // Cabin floor (raised wooden platform)
+    let cabin_floor = meshes.add(Cuboid::new(8.0, 0.2, 6.0));
     commands.spawn((
-        Mesh3d(platform.clone()),
-        MeshMaterial3d(blue.clone()),
-        Transform::from_xyz(0.0, 0.5, -9.0),
-        RigidBody::Static,
-        Collider::cuboid(3.0, 1.0, 3.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Jump Platform Near"),
+        Mesh3d(cabin_floor), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(0.0, 0.3, 0.0),
+        RigidBody::Static, Collider::cuboid(8.0, 0.2, 6.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Cabin Floor"),
     ));
 
-    // Far platform (3-unit gap)
+    // Cabin walls — log construction
+    let cabin_wall_long = meshes.add(Cuboid::new(0.4, 2.8, 6.0));
+    let cabin_wall_short = meshes.add(Cuboid::new(0.4, 2.8, 8.0));
+    let cabin_half_wall = meshes.add(Cuboid::new(0.4, 2.8, 2.5));
+
+    // West wall
     commands.spawn((
-        Mesh3d(platform.clone()),
-        MeshMaterial3d(blue.clone()),
-        Transform::from_xyz(0.0, 0.5, -15.0),
-        RigidBody::Static,
-        Collider::cuboid(3.0, 1.0, 3.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Jump Platform Far"),
+        Mesh3d(cabin_wall_long.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-4.0, 1.7, 0.0),
+        RigidBody::Static, Collider::cuboid(0.4, 2.8, 6.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin West Wall"),
+    ));
+    // East wall
+    commands.spawn((
+        Mesh3d(cabin_wall_long.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(4.0, 1.7, 0.0),
+        RigidBody::Static, Collider::cuboid(0.4, 2.8, 6.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin East Wall"),
+    ));
+    // North wall (solid back)
+    commands.spawn((
+        Mesh3d(cabin_wall_short.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(0.0, 1.7, -3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.4, 2.8, 8.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin North Wall"),
+    ));
+    // South wall — left of doorway
+    commands.spawn((
+        Mesh3d(cabin_half_wall.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-2.75, 1.7, 3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.4, 2.8, 2.5),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin South Wall L"),
+    ));
+    // South wall — right of doorway
+    commands.spawn((
+        Mesh3d(cabin_half_wall.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(2.75, 1.7, 3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.4, 2.8, 2.5),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin South Wall R"),
     ));
 
-    // --- Stepping stones (various heights) ---
-    let stone = meshes.add(Cuboid::new(1.5, 0.3, 1.5));
-    let stone_positions = [
-        (Vec3::new(0.0, 1.0, -20.0), yellow.clone()),
-        (Vec3::new(2.0, 1.5, -22.0), red.clone()),
-        (Vec3::new(-1.0, 2.0, -24.0), green.clone()),
-        (Vec3::new(1.5, 2.5, -26.0), blue.clone()),
-        (Vec3::new(-0.5, 3.0, -28.0), yellow.clone()),
+    // Cabin roof
+    let roof = meshes.add(Cuboid::new(9.0, 0.2, 7.0));
+    commands.spawn((
+        Mesh3d(roof), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(0.0, 3.3, 0.0),
+        RigidBody::Static, Collider::cuboid(9.0, 0.2, 7.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin Roof"),
+    ));
+
+    // Front porch
+    let porch_floor = meshes.add(Cuboid::new(8.0, 0.15, 3.0));
+    commands.spawn((
+        Mesh3d(porch_floor), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(0.0, 0.2, 5.5),
+        RigidBody::Static, Collider::cuboid(8.0, 0.15, 3.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Porch"),
+    ));
+
+    // Porch railings
+    let railing_side = meshes.add(Cuboid::new(0.2, 0.8, 3.0));
+    let railing_front = meshes.add(Cuboid::new(0.2, 0.8, 8.0));
+    commands.spawn((
+        Mesh3d(railing_side.clone()), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(-3.9, 0.7, 5.5),
+        RigidBody::Static, Collider::cuboid(0.2, 0.8, 3.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(railing_side), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(3.9, 0.7, 5.5),
+        RigidBody::Static, Collider::cuboid(0.2, 0.8, 3.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(railing_front), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(0.0, 0.7, 7.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.2, 0.8, 8.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+
+    // Porch steps
+    let step1 = meshes.add(Cuboid::new(2.0, 0.12, 0.6));
+    let step2 = meshes.add(Cuboid::new(2.0, 0.06, 0.6));
+    commands.spawn((
+        Mesh3d(step1), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(0.0, 0.12, 7.5),
+        RigidBody::Static, Collider::cuboid(2.0, 0.12, 0.6),
+        Friction::new(0.3), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(step2), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(0.0, 0.06, 8.0),
+        RigidBody::Static, Collider::cuboid(2.0, 0.06, 0.6),
+        Friction::new(0.3), rl.clone(),
+    ));
+
+    // Table inside cabin (worn wood)
+    let table = meshes.add(Cuboid::new(2.0, 0.8, 1.2));
+    commands.spawn((
+        Mesh3d(table), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(0.0, 0.4, -1.0),
+        RigidBody::Static, Collider::cuboid(2.0, 0.8, 1.2),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Cabin Table"),
+    ));
+
+    // Fireplace / hearth (stone)
+    let hearth = meshes.add(Cuboid::new(2.0, 1.0, 1.0));
+    commands.spawn((
+        Mesh3d(hearth), MeshMaterial3d(fireplace_stone.clone()),
+        Transform::from_xyz(0.0, 0.5, -2.5),
+        RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.0),
+        Friction::new(0.4), rl.clone(),
+        Name::new("Fireplace"),
+    ));
+
+    // Embers in the fireplace (faint glow)
+    let ember_mesh = meshes.add(Cuboid::new(1.0, 0.15, 0.6));
+    commands.spawn((
+        Mesh3d(ember_mesh), MeshMaterial3d(embers.clone()),
+        Transform::from_xyz(0.0, 0.15, -2.3),
+        rl.clone(),
+        Name::new("Embers"),
+    ));
+
+    // Chimney
+    let chimney = meshes.add(Cuboid::new(1.2, 3.0, 1.2));
+    commands.spawn((
+        Mesh3d(chimney), MeshMaterial3d(chimney_stone.clone()),
+        Transform::from_xyz(0.0, 3.0, -2.8),
+        RigidBody::Static, Collider::cuboid(1.2, 3.0, 1.2),
+        Friction::new(0.4), rl.clone(),
+        Name::new("Chimney"),
+    ));
+
+    // ========================================
+    // EQUIPMENT SHED — west of cabin
+    // ========================================
+
+    // Shed floor
+    let shed_floor = meshes.add(Cuboid::new(5.0, 0.15, 4.0));
+    commands.spawn((
+        Mesh3d(shed_floor), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(-14.0, 0.15, 2.0),
+        RigidBody::Static, Collider::cuboid(5.0, 0.15, 4.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Shed Floor"),
+    ));
+
+    // Shed walls
+    let shed_wall_w = meshes.add(Cuboid::new(0.3, 2.4, 4.0));
+    let shed_post = meshes.add(Cuboid::new(0.3, 2.4, 0.3));
+    let shed_wall_n = meshes.add(Cuboid::new(0.3, 2.4, 5.0));
+    let shed_wall_s = meshes.add(Cuboid::new(0.3, 2.4, 2.0));
+
+    commands.spawn((
+        Mesh3d(shed_wall_w), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-16.5, 1.2, 2.0),
+        RigidBody::Static, Collider::cuboid(0.3, 2.4, 4.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Shed West Wall"),
+    ));
+    // East side — open with posts
+    commands.spawn((
+        Mesh3d(shed_post.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-11.5, 1.2, 4.0),
+        RigidBody::Static, Collider::cuboid(0.3, 2.4, 0.3),
+        Friction::new(0.2), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(shed_post), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-11.5, 1.2, 0.0),
+        RigidBody::Static, Collider::cuboid(0.3, 2.4, 0.3),
+        Friction::new(0.2), rl.clone(),
+    ));
+    // North wall
+    commands.spawn((
+        Mesh3d(shed_wall_n), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-14.0, 1.2, 0.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.3, 2.4, 5.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Shed North Wall"),
+    ));
+    // South wall (partial)
+    commands.spawn((
+        Mesh3d(shed_wall_s), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(-15.0, 1.2, 4.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.3, 2.4, 2.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+
+    // Shed roof (corrugated metal)
+    let shed_roof = meshes.add(Cuboid::new(6.0, 0.1, 5.0));
+    commands.spawn((
+        Mesh3d(shed_roof), MeshMaterial3d(corrugated_metal.clone()),
+        Transform::from_xyz(-14.0, 2.5, 2.0),
+        RigidBody::Static, Collider::cuboid(6.0, 0.1, 5.0),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Shed Roof"),
+    ));
+
+    // Workbench inside shed
+    let workbench = meshes.add(Cuboid::new(2.5, 0.8, 0.8));
+    commands.spawn((
+        Mesh3d(workbench), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(-15.0, 0.4, 1.5),
+        RigidBody::Static, Collider::cuboid(2.5, 0.8, 0.8),
+        Friction::new(0.2), rl.clone(),
+        Name::new("Workbench"),
+    ));
+
+    // ========================================
+    // MINE ENTRANCE — carved into eastern hillside
+    // ========================================
+
+    // Mine tunnel floor
+    let mine_floor = meshes.add(Cuboid::new(3.0, 0.1, 8.0));
+    commands.spawn((
+        Mesh3d(mine_floor), MeshMaterial3d(dirt.clone()),
+        Transform::from_xyz(22.0, 0.8, -6.0),
+        RigidBody::Static, Collider::cuboid(3.0, 0.1, 8.0),
+        Friction::new(0.4), rl.clone(),
+        Name::new("Mine Floor"),
+    ));
+
+    // Mine tunnel walls
+    let mine_wall = meshes.add(Cuboid::new(0.4, 2.4, 8.0));
+    commands.spawn((
+        Mesh3d(mine_wall.clone()), MeshMaterial3d(mine_rock.clone()),
+        Transform::from_xyz(20.5, 2.0, -6.0),
+        RigidBody::Static, Collider::cuboid(0.4, 2.4, 8.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Mine Left Wall"),
+    ));
+    commands.spawn((
+        Mesh3d(mine_wall), MeshMaterial3d(mine_rock.clone()),
+        Transform::from_xyz(23.5, 2.0, -6.0),
+        RigidBody::Static, Collider::cuboid(0.4, 2.4, 8.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Mine Right Wall"),
+    ));
+
+    // Mine ceiling
+    let mine_ceiling = meshes.add(Cuboid::new(3.0, 0.3, 8.0));
+    commands.spawn((
+        Mesh3d(mine_ceiling), MeshMaterial3d(mine_rock.clone()),
+        Transform::from_xyz(22.0, 3.2, -6.0),
+        RigidBody::Static, Collider::cuboid(3.0, 0.3, 8.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Mine Ceiling"),
+    ));
+
+    // Mine support beams (timber frames)
+    let beam_post = meshes.add(Cuboid::new(0.25, 2.0, 0.25));
+    let beam_cross = meshes.add(Cuboid::new(2.8, 0.25, 0.25));
+    for z_off in [-3.0_f32, -6.0, -9.0] {
+        commands.spawn((
+            Mesh3d(beam_post.clone()), MeshMaterial3d(mine_timber.clone()),
+            Transform::from_xyz(20.8, 1.8, z_off),
+            RigidBody::Static, Collider::cuboid(0.25, 2.0, 0.25),
+            Friction::new(0.2), rl.clone(),
+        ));
+        commands.spawn((
+            Mesh3d(beam_post.clone()), MeshMaterial3d(mine_timber.clone()),
+            Transform::from_xyz(23.2, 1.8, z_off),
+            RigidBody::Static, Collider::cuboid(0.25, 2.0, 0.25),
+            Friction::new(0.2), rl.clone(),
+        ));
+        commands.spawn((
+            Mesh3d(beam_cross.clone()), MeshMaterial3d(mine_timber.clone()),
+            Transform::from_xyz(22.0, 3.0, z_off),
+            RigidBody::Static, Collider::cuboid(2.8, 0.25, 0.25),
+            Friction::new(0.2), rl.clone(),
+        ));
+    }
+
+    // Mine entrance overhang
+    let overhang = meshes.add(Cuboid::new(5.0, 1.0, 2.0));
+    commands.spawn((
+        Mesh3d(overhang), MeshMaterial3d(stone_dark.clone()),
+        Transform::from_xyz(22.0, 3.5, -2.0),
+        RigidBody::Static, Collider::cuboid(5.0, 1.0, 2.0),
+        Friction::new(0.5), rl.clone(),
+        Name::new("Mine Overhang"),
+    ));
+
+    // ========================================
+    // SUPPLY CRATES & BARRELS
+    // ========================================
+
+    let crate_mesh_large = meshes.add(Cuboid::new(1.0, 0.8, 1.0));
+    let crate_mesh_med = meshes.add(Cuboid::new(0.8, 0.4, 0.8));
+    let crate_mesh_sm = meshes.add(Cuboid::new(0.6, 0.6, 0.6));
+    let crate_wide = meshes.add(Cuboid::new(1.2, 0.7, 0.8));
+    let crate_tiny = meshes.add(Cuboid::new(0.5, 0.5, 0.5));
+    let barrel_mesh = meshes.add(Cuboid::new(0.7, 1.0, 0.7));
+
+    // Crate stack near shed
+    commands.spawn((
+        Mesh3d(crate_mesh_large.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(-12.0, 0.4, 4.0),
+        RigidBody::Static, Collider::cuboid(1.0, 0.8, 1.0),
+        Friction::new(0.3), rl.clone(), Name::new("Crate Stack 1"),
+    ));
+    commands.spawn((
+        Mesh3d(crate_mesh_med.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(-12.0, 1.0, 4.0),
+        RigidBody::Static, Collider::cuboid(0.8, 0.4, 0.8),
+        Friction::new(0.3), rl.clone(), Name::new("Crate Stack 2"),
+    ));
+    commands.spawn((
+        Mesh3d(crate_mesh_sm.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(-11.0, 0.3, 3.5),
+        RigidBody::Static, Collider::cuboid(0.6, 0.6, 0.6),
+        Friction::new(0.3), rl.clone(),
+    ));
+
+    // Crates near cabin porch
+    commands.spawn((
+        Mesh3d(crate_wide.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(5.5, 0.35, 6.0),
+        RigidBody::Static, Collider::cuboid(1.2, 0.7, 0.8),
+        Friction::new(0.3), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(crate_tiny.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(6.5, 0.25, 5.5),
+        RigidBody::Static, Collider::cuboid(0.5, 0.5, 0.5),
+        Friction::new(0.3), rl.clone(),
+    ));
+
+    // Barrel cluster south of cabin
+    for (x, z) in [(-3.0, 8.0), (-2.0, 8.5), (-2.5, 9.2)] {
+        commands.spawn((
+            Mesh3d(barrel_mesh.clone()), MeshMaterial3d(barrel_metal.clone()),
+            Transform::from_xyz(x, 0.5, z),
+            RigidBody::Static, Collider::cuboid(0.7, 1.0, 0.7),
+            Friction::new(0.3), rl.clone(),
+        ));
+    }
+
+    // Crate near mine entrance
+    commands.spawn((
+        Mesh3d(crate_mesh_large.clone()), MeshMaterial3d(crate_wood.clone()),
+        Transform::from_xyz(19.5, 1.2, -3.0),
+        RigidBody::Static, Collider::cuboid(1.0, 0.8, 1.0),
+        Friction::new(0.3), rl.clone(),
+    ));
+
+    // ========================================
+    // ROCKY OUTCROPS & BOULDERS
+    // ========================================
+
+    // NW boulder cluster
+    let boulder_lg = meshes.add(Cuboid::new(3.0, 1.4, 2.5));
+    commands.spawn((
+        Mesh3d(boulder_lg), MeshMaterial3d(stone_gray.clone()),
+        Transform::from_xyz(-10.0, 0.7, -15.0),
+        RigidBody::Static, Collider::cuboid(3.0, 1.4, 2.5),
+        Friction::new(0.7), rl.clone(), Name::new("Boulder NW 1"),
+    ));
+    let boulder_md = meshes.add(Cuboid::new(1.8, 0.8, 1.5));
+    commands.spawn((
+        Mesh3d(boulder_md.clone()), MeshMaterial3d(stone_gray.clone()),
+        Transform::from_xyz(-8.5, 0.4, -13.5),
+        RigidBody::Static, Collider::cuboid(1.8, 0.8, 1.5),
+        Friction::new(0.7), rl.clone(),
+    ));
+    let boulder_md2 = meshes.add(Cuboid::new(2.0, 1.0, 1.5));
+    commands.spawn((
+        Mesh3d(boulder_md2), MeshMaterial3d(rock_red.clone()),
+        Transform::from_xyz(-11.5, 0.5, -14.0).with_rotation(Quat::from_rotation_y(0.4)),
+        RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.5),
+        Friction::new(0.7), rl.clone(),
+    ));
+
+    // NE rocky ridge (cover near mine approach)
+    let ridge1 = meshes.add(Cuboid::new(4.0, 1.2, 1.5));
+    commands.spawn((
+        Mesh3d(ridge1), MeshMaterial3d(stone_dark.clone()),
+        Transform::from_xyz(12.0, 0.6, -16.0).with_rotation(Quat::from_rotation_y(0.3)),
+        RigidBody::Static, Collider::cuboid(4.0, 1.2, 1.5),
+        Friction::new(0.7), rl.clone(), Name::new("Ridge NE 1"),
+    ));
+    let ridge2 = meshes.add(Cuboid::new(2.0, 0.8, 2.0));
+    commands.spawn((
+        Mesh3d(ridge2), MeshMaterial3d(stone_gray.clone()),
+        Transform::from_xyz(14.0, 0.4, -14.0),
+        RigidBody::Static, Collider::cuboid(2.0, 0.8, 2.0),
+        Friction::new(0.7), rl.clone(),
+    ));
+    let ridge3 = meshes.add(Cuboid::new(2.5, 0.6, 1.5));
+    commands.spawn((
+        Mesh3d(ridge3), MeshMaterial3d(stone_dark.clone()),
+        Transform::from_xyz(10.0, 0.3, -18.0).with_rotation(Quat::from_rotation_y(-0.2)),
+        RigidBody::Static, Collider::cuboid(2.5, 0.6, 1.5),
+        Friction::new(0.7), rl.clone(),
+    ));
+
+    // Mid-field boulders (combat cover)
+    let cover1 = meshes.add(Cuboid::new(1.8, 0.9, 1.2));
+    commands.spawn((
+        Mesh3d(cover1), MeshMaterial3d(stone_gray.clone()),
+        Transform::from_xyz(7.0, 0.45, -5.0).with_rotation(Quat::from_rotation_y(0.7)),
+        RigidBody::Static, Collider::cuboid(1.8, 0.9, 1.2),
+        Friction::new(0.7), rl.clone(),
+    ));
+    let cover2 = meshes.add(Cuboid::new(1.5, 0.7, 1.5));
+    commands.spawn((
+        Mesh3d(cover2), MeshMaterial3d(rock_red.clone()),
+        Transform::from_xyz(-6.0, 0.35, -8.0),
+        RigidBody::Static, Collider::cuboid(1.5, 0.7, 1.5),
+        Friction::new(0.7), rl.clone(),
+    ));
+    let cover3 = meshes.add(Cuboid::new(2.0, 0.6, 1.0));
+    commands.spawn((
+        Mesh3d(cover3), MeshMaterial3d(stone_dark.clone()),
+        Transform::from_xyz(3.0, 0.3, -20.0).with_rotation(Quat::from_rotation_y(1.1)),
+        RigidBody::Static, Collider::cuboid(2.0, 0.6, 1.0),
+        Friction::new(0.7), rl.clone(),
+    ));
+
+    // ========================================
+    // FALLEN LOGS
+    // ========================================
+
+    let fallen_log_sizes = [
+        (Vec3::new(-5.0, 0.25, -12.0), 0.6_f32, Vec3::new(0.4, 0.4, 5.0)),
+        (Vec3::new(8.0, 0.3, -22.0), -0.8, Vec3::new(0.5, 0.5, 6.0)),
+        (Vec3::new(-8.0, 0.2, 5.0), 1.2, Vec3::new(0.35, 0.35, 4.0)),
+    ];
+    for (pos, rot_y, size) in fallen_log_sizes {
+        let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
+        commands.spawn((
+            Mesh3d(m), MeshMaterial3d(log_wood.clone()),
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(rot_y)),
+            RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(0.4), rl.clone(),
+        ));
+    }
+
+    // ========================================
+    // PINE TREES — trunk (bark cuboid) + canopy (green cuboids)
+    // ========================================
+
+    let trunk_mesh = meshes.add(Cuboid::new(0.6, 4.0, 0.6));
+    // Three sizes of canopy for variety
+    let canopy_large = meshes.add(Cuboid::new(3.5, 5.0, 3.5));
+    let canopy_med = meshes.add(Cuboid::new(2.8, 4.0, 2.8));
+    let canopy_small = meshes.add(Cuboid::new(2.2, 3.5, 2.2));
+
+    let tree_data: &[(Vec3, u8)] = &[
+        // (position of trunk base center, size: 0=large, 1=med, 2=small)
+        (Vec3::new(-18.0, 0.0, -18.0), 0), (Vec3::new(-15.0, 0.0, -22.0), 1),
+        (Vec3::new(-20.0, 0.0, -5.0), 0),  (Vec3::new(-22.0, 0.0, 5.0), 2),
+        (Vec3::new(-17.0, 0.0, 10.0), 1),  (Vec3::new(-12.0, 0.0, -20.0), 0),
+        (Vec3::new(15.0, 0.0, -24.0), 1),  (Vec3::new(18.0, 0.0, -20.0), 0),
+        (Vec3::new(10.0, 0.0, 8.0), 2),    (Vec3::new(14.0, 0.0, 5.0), 1),
+        (Vec3::new(-5.0, 0.0, -25.0), 0),  (Vec3::new(5.0, 0.0, -28.0), 2),
+        (Vec3::new(-25.0, 0.0, -15.0), 0), (Vec3::new(20.0, 0.0, 3.0), 1),
+        (Vec3::new(-8.0, 0.0, 12.0), 2),   (Vec3::new(8.0, 0.0, 14.0), 0),
+        (Vec3::new(0.0, 0.0, -32.0), 1),   (Vec3::new(-14.0, 0.0, -28.0), 0),
     ];
 
-    for (i, (pos, mat)) in stone_positions.into_iter().enumerate() {
+    for (base_pos, size) in tree_data {
+        let trunk_y = base_pos.y + 2.0;
+        // Trunk
         commands.spawn((
-            Mesh3d(stone.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos),
-            RigidBody::Static,
-            Collider::cuboid(1.5, 0.3, 1.5),
-            Friction::new(0.0),
-            RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-            Name::new(format!("Stepping Stone {}", i + 1)),
+            Mesh3d(trunk_mesh.clone()), MeshMaterial3d(pine_bark.clone()),
+            Transform::from_xyz(base_pos.x, trunk_y, base_pos.z),
+            RigidBody::Static, Collider::cuboid(0.6, 4.0, 0.6),
+            Friction::new(0.3), rl.clone(),
+        ));
+        // Canopy
+        let (canopy, canopy_h, green_mat) = match size {
+            0 => (canopy_large.clone(), 6.5, pine_green.clone()),
+            1 => (canopy_med.clone(), 6.0, pine_green_dark.clone()),
+            _ => (canopy_small.clone(), 5.5, pine_green.clone()),
+        };
+        commands.spawn((
+            Mesh3d(canopy), MeshMaterial3d(green_mat),
+            Transform::from_xyz(base_pos.x, base_pos.y + canopy_h, base_pos.z),
+            rl.clone(),
         ));
     }
 
-    // --- Tall pillars to jump between ---
-    let pillar = meshes.add(Cuboid::new(1.5, 6.0, 1.5));
+    // ========================================
+    // WATCHTOWER — elevated lookout NW of cabin
+    // ========================================
+
+    let post_mesh = meshes.add(Cuboid::new(0.3, 4.0, 0.3));
+    let tower_platform = meshes.add(Cuboid::new(4.0, 0.2, 4.0));
+    let tower_wall = meshes.add(Cuboid::new(0.15, 1.0, 4.0));
+    let tower_wall_short = meshes.add(Cuboid::new(0.15, 1.0, 4.0));
+    let ladder_mesh = meshes.add(Cuboid::new(0.5, 0.15, 1.0));
+
+    // Four posts
+    for (x, z) in [(-9.0, -6.0), (-9.0, -9.0), (-6.0, -6.0), (-6.0, -9.0)] {
+        commands.spawn((
+            Mesh3d(post_mesh.clone()), MeshMaterial3d(log_wood.clone()),
+            Transform::from_xyz(x, 2.0, z),
+            RigidBody::Static, Collider::cuboid(0.3, 4.0, 0.3),
+            Friction::new(0.3), rl.clone(),
+        ));
+    }
+    // Platform
     commands.spawn((
-        Mesh3d(pillar.clone()),
-        MeshMaterial3d(dark_gray.clone()),
-        Transform::from_xyz(-6.0, 3.0, -20.0),
-        RigidBody::Static,
-        Collider::cuboid(1.5, 6.0, 1.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Pillar 1"),
+        Mesh3d(tower_platform), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(-7.5, 3.8, -7.5),
+        RigidBody::Static, Collider::cuboid(4.0, 0.2, 4.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Watchtower Platform"),
     ));
+    // Ladder
     commands.spawn((
-        Mesh3d(pillar),
-        MeshMaterial3d(dark_gray.clone()),
-        Transform::from_xyz(-6.0, 3.0, -24.0),
-        RigidBody::Static,
-        Collider::cuboid(1.5, 6.0, 1.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Pillar 2"),
+        Mesh3d(ladder_mesh), MeshMaterial3d(aged_wood.clone()),
+        Transform::from_xyz(-5.5, 1.9, -7.5).with_rotation(Quat::from_rotation_z(0.5)),
+        RigidBody::Static, Collider::cuboid(0.5, 0.15, 1.0),
+        Friction::new(0.4), rl.clone(),
+        Name::new("Ladder"),
     ));
 
-    // --- Wide low wall to jump over ---
-    let low_wall = meshes.add(Cuboid::new(6.0, 1.2, 0.5));
+    // Half-walls (cover on watchtower)
     commands.spawn((
-        Mesh3d(low_wall),
-        MeshMaterial3d(red.clone()),
-        Transform::from_xyz(6.0, 0.6, -18.0),
-        RigidBody::Static,
-        Collider::cuboid(6.0, 1.2, 0.5),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Low Wall"),
+        Mesh3d(tower_wall.clone()), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(-9.2, 4.4, -7.5),
+        RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(tower_wall.clone()), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(-5.8, 4.4, -7.5),
+        RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
+        Friction::new(0.2), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(tower_wall_short), MeshMaterial3d(plank_wood.clone()),
+        Transform::from_xyz(-7.5, 4.4, -9.2)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
+        Friction::new(0.2), rl.clone(),
     ));
 
-    // --- Elevated walkway ---
-    let walkway = meshes.add(Cuboid::new(2.0, 0.3, 12.0));
+    // ========================================
+    // OLD PICKUP TRUCK — rusted, SE of cabin
+    // ========================================
+
+    let truck_body = meshes.add(Cuboid::new(2.5, 1.2, 5.0));
+    let truck_cab = meshes.add(Cuboid::new(2.3, 1.0, 2.5));
+    let rot_truck = Quat::from_rotation_y(0.3);
+
     commands.spawn((
-        Mesh3d(walkway),
-        MeshMaterial3d(gray.clone()),
-        Transform::from_xyz(10.0, 2.0, -16.0),
-        RigidBody::Static,
-        Collider::cuboid(2.0, 0.3, 12.0),
-        Friction::new(0.0),
-        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
-        Name::new("Elevated Walkway"),
+        Mesh3d(truck_body), MeshMaterial3d(rusted_metal.clone()),
+        Transform::from_xyz(10.0, 0.6, 3.0).with_rotation(rot_truck),
+        RigidBody::Static, Collider::cuboid(2.5, 1.2, 5.0),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Truck Body"),
+    ));
+    commands.spawn((
+        Mesh3d(truck_cab), MeshMaterial3d(rusted_metal.clone()),
+        Transform::from_xyz(10.0, 1.5, 1.5).with_rotation(rot_truck),
+        RigidBody::Static, Collider::cuboid(2.3, 1.0, 2.5),
+        Friction::new(0.3), rl.clone(),
+        Name::new("Truck Cab"),
     ));
 
-    info!("Spawned world: room with door gap + physics gym");
+    // ========================================
+    // CAMPFIRE RING — south of cabin
+    // ========================================
+
+    let fire_stone = meshes.add(Cuboid::new(0.4, 0.3, 0.4));
+    let ring_center = Vec3::new(3.0, 0.0, 10.0);
+    for i in 0..8 {
+        let angle = i as f32 * std::f32::consts::TAU / 8.0;
+        let r = 1.2;
+        let x = ring_center.x + angle.cos() * r;
+        let z = ring_center.z + angle.sin() * r;
+        commands.spawn((
+            Mesh3d(fire_stone.clone()), MeshMaterial3d(stone_dark.clone()),
+            Transform::from_xyz(x, 0.15, z),
+            RigidBody::Static, Collider::cuboid(0.4, 0.3, 0.4),
+            Friction::new(0.7), rl.clone(),
+        ));
+    }
+
+    // Campfire embers (glow)
+    let campfire_embers = meshes.add(Cuboid::new(0.6, 0.2, 0.6));
+    commands.spawn((
+        Mesh3d(campfire_embers), MeshMaterial3d(embers.clone()),
+        Transform::from_xyz(ring_center.x, 0.1, ring_center.z),
+        rl.clone(),
+        Name::new("Campfire Embers"),
+    ));
+
+    // Log seats
+    let log_seat = meshes.add(Cuboid::new(0.3, 0.3, 1.8));
+    commands.spawn((
+        Mesh3d(log_seat.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(1.0, 0.2, 10.0),
+        RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
+        Friction::new(0.4), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(log_seat.clone()), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(5.0, 0.2, 10.0),
+        RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
+        Friction::new(0.4), rl.clone(),
+    ));
+    commands.spawn((
+        Mesh3d(log_seat), MeshMaterial3d(log_wood.clone()),
+        Transform::from_xyz(3.0, 0.2, 12.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+        RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
+        Friction::new(0.4), rl.clone(),
+    ));
+
+    // Campfire point light (warm flicker simulated with static warm light)
+    commands.spawn((
+        PointLight {
+            color: Color::srgb(1.0, 0.6, 0.2),
+            intensity: 15000.0,
+            range: 12.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(ring_center.x, 0.5, ring_center.z),
+        rl.clone(),
+    ));
+
+    info!("Spawned world: Colorado wilderness compound (cabin, shed, mine, watchtower)");
 }
 
 /// Server-only: spawns interactive world objects as replicated entities.
 /// Clients receive these via lightyear replication and add rendering in observers.
+///
+/// Layout matches the Colorado wilderness compound:
+///   - Cabin door in south wall doorway
+///   - Pickaxe on the workbench in the shed
+///   - AK47 on the cabin table
+///   - Ore vein inside the mine tunnel
 pub fn spawn_server_interactive_objects(mut commands: Commands) {
-    // Door in the north wall gap
+    // Cabin door — south wall doorway (2.5m gap centered at x=0, z=3)
     commands.spawn((
-        Position(Vec3::new(0.0, 2.0, -5.0)),
+        Position(Vec3::new(0.0, 1.7, 3.0)),
         Rotation::default(),
         RigidBody::Static,
-        Collider::cuboid(3.0, 4.0, 0.3),
+        Collider::cuboid(2.5, 2.8, 0.3),
         Friction::new(0.0),
         DoorState { open: false },
-        Name::new("Door"),
+        Name::new("Cabin Door"),
         Replicate::to_clients(NetworkTarget::All),
     ));
 
-    // Pickaxe on the table
+    // Pickaxe on the workbench inside the shed
     commands.spawn((
-        Position(Vec3::new(0.0, 0.5, -3.0)),
+        Position(Vec3::new(-15.0, 0.9, 1.5)),
         Rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
         RigidBody::Kinematic,
         Collider::cuboid(0.6, 0.2, 0.6),
@@ -634,9 +1475,9 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
         Replicate::to_clients(NetworkTarget::All),
     ));
 
-    // AK47 on the table
+    // AK47 on the cabin table
     commands.spawn((
-        Position(Vec3::new(-1.0, 0.5, -3.0)),
+        Position(Vec3::new(0.0, 0.9, -1.0)),
         Rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_4)),
         RigidBody::Kinematic,
         Collider::cuboid(0.6, 0.2, 0.6),
@@ -647,17 +1488,15 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             interaction_distance: 2.0,
             scale: 1.8,
             model_rotation: [std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2, 0.0],
-            // Muzzle tip in camera-local space: gun at (0.2, -0.15, -0.4),
-            // barrel extends ~0.5 along -Z at scale 1.0
             muzzle_offset: Some([0.2, -0.1, -0.9]),
         },
         Name::new("AK47"),
         Replicate::to_clients(NetworkTarget::All),
     ));
 
-    // Ore block in room
+    // Ore vein inside the mine tunnel (deep end)
     commands.spawn((
-        Position(Vec3::new(2.0, 0.5, -3.0)),
+        Position(Vec3::new(22.0, 1.2, -9.0)),
         Rotation::default(),
         RigidBody::Static,
         Collider::cuboid(0.5, 0.5, 0.5),
@@ -670,28 +1509,44 @@ pub fn spawn_server_interactive_objects(mut commands: Commands) {
             mine_start_secs: None,
             last_mine_secs: None,
         },
-        Name::new("Ore Block"),
+        Name::new("Ore Vein"),
         Replicate::to_clients(NetworkTarget::All),
     ));
 
-    info!("Server spawned interactive objects (door, pickaxe, AK47, ore block)");
+    info!("Server spawned interactive objects (cabin door, pickaxe in shed, AK47 on table, ore in mine)");
 }
 
+/// Lighting for the Colorado wilderness — late afternoon golden hour,
+/// sun low in the west casting long shadows through the pines.
 pub fn spawn_lights(mut commands: Commands) {
+    // Ambient: cool blue-gray from overcast Colorado sky
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(1.0, 0.95, 0.9),
-        brightness: 0.3,
+        color: Color::srgb(0.65, 0.70, 0.80),
+        brightness: 0.15,
         ..default()
     });
 
+    // Main sun — low angle, warm golden (late afternoon, west)
     commands.spawn((
         DirectionalLight {
-            illuminance: 10000.0,
+            illuminance: 12000.0,
             shadows_enabled: true,
-            color: Color::from(tailwind::ROSE_300),
+            color: Color::srgb(1.0, 0.85, 0.55),
             ..default()
         },
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-20.0, 12.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER, VIEW_MODEL_RENDER_LAYER]),
+    ));
+
+    // Fill light — cool blue bounce from sky (opposite side)
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 2000.0,
+            shadows_enabled: false,
+            color: Color::srgb(0.6, 0.7, 0.9),
+            ..default()
+        },
+        Transform::from_xyz(15.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
         RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER, VIEW_MODEL_RENDER_LAYER]),
     ));
 }
@@ -712,15 +1567,15 @@ pub fn init_replicated_doors(
     for (entity, door_state, pos, rot) in door_query.iter() {
         info!("init_replicated_doors: {:?} at {:?}", entity, pos.0);
 
-        let door_mesh = meshes.add(Cuboid::new(3.0, 4.0, 0.3));
-        let wood = materials.add(Color::from(tailwind::AMBER_700));
+        let door_mesh = meshes.add(Cuboid::new(2.5, 2.8, 0.3));
+        let wood = materials.add(Color::srgb(0.35, 0.22, 0.12));
 
         commands.entity(entity).insert((
             Mesh3d(door_mesh),
             MeshMaterial3d(wood),
             Transform::from_translation(pos.0).with_rotation(rot.0),
             Visibility::default(),
-            Collider::cuboid(3.0, 4.0, 0.3),
+            Collider::cuboid(2.5, 2.8, 0.3),
             Friction::new(0.0),
             RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
         ));
