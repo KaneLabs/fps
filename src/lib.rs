@@ -6,6 +6,7 @@ use lightyear::avian3d::prelude::*;
 pub mod auth;
 pub mod player;
 pub mod protocol;
+pub mod solana;
 pub mod world;
 
 pub const PROTOCOL_ID: u64 = 7;

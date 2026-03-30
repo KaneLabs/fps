@@ -114,6 +114,7 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
         crate::protocol::PlayerYaw::default(),
         PlayerPitch::default(),
         PlayerEquipped::default(),
+        crate::protocol::PlayerInventory::default(),
         PlayerHealth::default(),
         crate::protocol::LastDamagedBy::default(),
         CharacterVelocity::default(),

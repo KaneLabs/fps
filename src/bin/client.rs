@@ -142,8 +142,14 @@ fn main() {
 
     app.add_systems(
         Update,
-        (cleanup_tracers, animate_jab, health_hud, death_screen, kill_feed_ui, log_health_changes)
+        (cleanup_tracers, animate_jab, health_hud, inventory_hud, death_screen, kill_feed_ui, log_health_changes)
             .run_if(in_state(AppState::InGame)),
+    );
+
+    // Wallet auth: send signed proof to server after connection established
+    app.add_systems(
+        Update,
+        send_wallet_auth.run_if(in_state(AppState::InGame)),
     );
 
     app.add_observer(on_predicted_spawn);
@@ -758,6 +764,43 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
         .id();
 
     commands.trigger(Connect { entity: client_entity });
+
+    // Store the client entity so we can send wallet auth after connection
+    commands.insert_resource(PendingWalletAuth(client_entity));
+}
+
+/// Resource tracking that we need to send wallet auth on the client entity.
+/// Consumed once the auth message is sent.
+#[derive(Resource)]
+struct PendingWalletAuth(Entity);
+
+/// Client-side system: sends wallet auth message to server after connection.
+/// Signs "ANIMA_AUTH_v1:{client_id}" with the Ed25519 keypair and sends
+/// the pubkey + signature via the AuthChannel for server verification.
+fn send_wallet_auth(
+    pending: Option<Res<PendingWalletAuth>>,
+    mut sender_query: Query<(&mut MessageSender<multiplayer::protocol::WalletAuthMessage>, Has<Connected>)>,
+    identity: Res<multiplayer::auth::ClientIdentity>,
+    mut commands: Commands,
+) {
+    let Some(pending) = pending else { return; };
+    let Ok((mut sender, is_connected)) = sender_query.get_mut(pending.0) else {
+        return;
+    };
+    if !is_connected { return; }
+
+    // Sign and send wallet auth
+    let (pubkey, signature) = identity.sign_auth();
+    let auth_msg = multiplayer::protocol::WalletAuthMessage { pubkey, signature };
+
+    sender.send::<multiplayer::protocol::AuthChannel>(auth_msg);
+    info!(
+        "[AUTH] Sent wallet auth to server (pubkey: {}, id: {})",
+        identity.address, identity.client_id
+    );
+
+    // Remove resource — auth sent, don't send again
+    commands.remove_resource::<PendingWalletAuth>();
 }
 
 // ========================================
@@ -828,6 +871,71 @@ fn health_hud(
                 chakra(12.0),
                 egui::Color32::WHITE,
             );
+        });
+}
+
+/// Inventory HUD — bottom-left, shows equipped item and carried inventory.
+fn inventory_hud(
+    mut contexts: EguiContexts,
+    player_query: Query<(&PlayerEquipped, &PlayerInventory), With<Controlled>>,
+    mut frame_count: Local<u32>,
+) {
+    *frame_count += 1;
+    if *frame_count <= 2 { return; }
+    let Ok((equipped, inventory)) = player_query.single() else { return; };
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+
+    // Only show if the player has something equipped or in inventory
+    if equipped.0.is_none() && inventory.items.is_empty() {
+        return;
+    }
+
+    let screen = ctx.screen_rect();
+
+    egui::Area::new(egui::Id::new("inventory_hud"))
+        .fixed_pos(egui::pos2(16.0, screen.height() - 140.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140);
+            let frame = egui::Frame::NONE
+                .fill(bg)
+                .inner_margin(egui::Margin::same(8))
+                .corner_radius(4.0);
+
+            frame.show(ui, |ui| {
+                // Equipped item
+                if let Some(ref name) = equipped.0 {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("▸")
+                                .font(chakra(13.0))
+                                .color(egui::Color32::from_rgb(100, 160, 255)),
+                        );
+                        ui.label(
+                            egui::RichText::new(name)
+                                .font(chakra(13.0))
+                                .color(egui::Color32::WHITE),
+                        );
+                    });
+                }
+
+                // Inventory items
+                if !inventory.items.is_empty() {
+                    if equipped.0.is_some() {
+                        ui.add_space(2.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+                    }
+                    for item in &inventory.items {
+                        ui.label(
+                            egui::RichText::new(format!("  {}", item))
+                                .font(chakra(11.0))
+                                .color(cream(0.6)),
+                        );
+                    }
+                }
+            });
         });
 }
 

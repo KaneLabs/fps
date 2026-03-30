@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use avian3d::prelude::*;
 use bevy::math::VectorSpace;
 use bevy::prelude::*;
@@ -110,6 +112,16 @@ pub struct LookAction;
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct PlayerEquipped(pub Option<String>);
 
+/// Player inventory — list of carried item names (weapons, resources, etc).
+/// Server-authoritative, replicated to all clients. The equipped item is NOT
+/// in this list — it lives in PlayerEquipped. On death, all items (equipped +
+/// inventory) drop as world Equippable entities at the death position.
+/// These will eventually map to SPL tokens on Solana.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct PlayerInventory {
+    pub items: Vec<String>,
+}
+
 /// Player health. Server-authoritative, replicated to all clients.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PlayerHealth(pub i32);
@@ -144,6 +156,30 @@ pub struct KillFeedEntry {
     pub timestamp: f32,
 }
 
+// --- Wallet Auth (Solana Challenge-Response) ---
+
+/// Lightyear channel for wallet authentication messages.
+/// Reliable + ordered — auth must arrive and in sequence.
+pub struct AuthChannel;
+
+/// Client → Server: wallet auth proof.
+/// Sent immediately after connection to prove ownership of the Ed25519 keypair.
+///
+/// The server verifies:
+/// 1. pubkey_to_client_id(pubkey) == connection's client_id
+/// 2. ed25519_verify(pubkey, "ANIMA_AUTH_v1:{client_id}", signature) passes
+///
+/// On success, the server stores the full Solana wallet address (base58 pubkey)
+/// and attaches a WalletAddress component to the player entity.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WalletAuthMessage {
+    /// The client's full 32-byte Ed25519 public key (= Solana wallet address bytes)
+    pub pubkey: [u8; 32],
+    /// 64-byte Ed25519 signature over "ANIMA_AUTH_v1:{client_id}"
+    /// Stored as Vec<u8> because serde doesn't support [u8; 64] by default.
+    pub signature: Vec<u8>,
+}
+
 // --- Protocol Plugin ---
 
 pub struct ProtocolPlugin;
@@ -175,6 +211,7 @@ impl Plugin for ProtocolPlugin {
             .add_linear_interpolation();
         app.register_component::<PlayerEquipped>()
             .add_prediction();
+        app.register_component::<PlayerInventory>();
         app.register_component::<PlayerHealth>();
         app.register_component::<PlayerDisplayId>();
         app.register_component::<LastDamagedBy>();
@@ -206,6 +243,23 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<crate::world::DoorState>();
         app.register_component::<crate::world::Equippable>();
         app.register_component::<crate::world::Interactable>();
+
+        // Solana wallet address — attached to player entity after auth verification
+        app.register_component::<crate::solana::WalletAddress>();
+
+        // --- Wallet Auth Channel + Message ---
+        // Reliable ordered channel for auth handshake.
+        // Client sends WalletAuthMessage immediately after connection.
+        // Server verifies and maps pubkey → player entity.
+        app.add_channel::<AuthChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            send_frequency: Duration::default(),
+            priority: 10.0,
+        })
+        .add_direction(NetworkDirection::Bidirectional);
+
+        app.register_message::<WalletAuthMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }
 
