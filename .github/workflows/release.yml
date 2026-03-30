@@ -46,7 +46,7 @@ jobs:
           echo "::notice::Release tag: ${TAG} | Version: ${VERSION} | SHA: ${SHORT_SHA}"
 
   # ============================================
-  # macOS arm64 client
+  # macOS arm64 — .app bundle + .dmg installer
   # ============================================
   build-macos-client:
     needs: [version]
@@ -77,20 +77,89 @@ jobs:
           ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: cargo build --release --bin client --target aarch64-apple-darwin
 
-      - name: Package
+      - name: Create .app bundle
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          TAG="${{ needs.version.outputs.tag }}"
-          mkdir -p dist/anima
-          cp target/aarch64-apple-darwin/release/client dist/anima/anima
-          cp -r assets dist/anima/
-          echo "${TAG}" > dist/anima/VERSION
-          cd dist && zip -r ../anima-macos-arm64.zip anima/
+          APP="Anima.app"
+          CONTENTS="${APP}/Contents"
 
-      - name: Upload artifact
+          # Directory structure
+          mkdir -p "${CONTENTS}/MacOS"
+          mkdir -p "${CONTENTS}/Resources"
+
+          # Binary
+          cp target/aarch64-apple-darwin/release/client "${CONTENTS}/MacOS/anima"
+          chmod +x "${CONTENTS}/MacOS/anima"
+
+          # Assets — game needs these at runtime, placed next to binary
+          cp -r assets "${CONTENTS}/Resources/assets"
+
+          # Wrapper script: cd to Resources so the binary finds assets/
+          cat > "${CONTENTS}/MacOS/anima-launcher" << 'LAUNCHER'
+          #!/usr/bin/env bash
+          DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
+          cd "$DIR"
+          exec "$(dirname "$0")/anima" "$@"
+          LAUNCHER
+          chmod +x "${CONTENTS}/MacOS/anima-launcher"
+
+          # Update Info.plist to use the launcher
+          sed -e "s/__VERSION__/${TAG}/" \
+              -e "s/__SHORT_VERSION__/${VERSION}/" \
+              -e "s|<string>anima</string>|<string>anima-launcher</string>|" \
+              macos/Info.plist.template > "${CONTENTS}/Info.plist"
+
+          # Icon — generate .icns from cover art
+          bash macos/create-icns.sh assets/images/anima-cover.png "${CONTENTS}/Resources/AppIcon.icns"
+
+          # Version file
+          echo "${TAG}" > "${CONTENTS}/Resources/VERSION"
+
+          echo "==> Anima.app bundle created"
+          ls -la "${CONTENTS}/MacOS/"
+          ls -la "${CONTENTS}/Resources/"
+
+      - name: Create .dmg installer
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          DMG_NAME="anima-macos-arm64-${TAG}.dmg"
+          DMG_STABLE="anima-macos-arm64.dmg"
+          STAGING="dmg-staging"
+
+          mkdir -p "${STAGING}"
+          cp -r Anima.app "${STAGING}/"
+
+          # Create symlink to /Applications for drag-and-drop install
+          ln -s /Applications "${STAGING}/Applications"
+
+          # Create DMG
+          hdiutil create \
+            -volname "Anima ${TAG}" \
+            -srcfolder "${STAGING}" \
+            -ov \
+            -format UDZO \
+            "${DMG_NAME}"
+
+          # Also create stable-named copy for website download URL
+          cp "${DMG_NAME}" "${DMG_STABLE}"
+
+          echo "==> Created ${DMG_NAME} ($(du -h "${DMG_NAME}" | cut -f1))"
+
+      - name: Upload versioned DMG
         uses: actions/upload-artifact@v4
         with:
-          name: anima-macos-arm64
-          path: anima-macos-arm64.zip
+          name: anima-macos-arm64-dmg-versioned
+          path: anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg
+          retention-days: 30
+
+      - name: Upload stable DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-macos-arm64-dmg-stable
+          path: anima-macos-arm64.dmg
           retention-days: 30
 
   # ============================================
@@ -129,18 +198,32 @@ jobs:
         run: cargo build --release --bin client
 
       - name: Package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist/anima
           cp target/release/client dist/anima/anima
           cp -r assets dist/anima/
           echo "${TAG}" > dist/anima/VERSION
-          cd dist && zip -r ../anima-linux-x64.zip anima/
 
-      - name: Upload artifact
+          # Versioned artifact
+          cd dist && zip -r "../anima-linux-x64-${TAG}.zip" anima/
+          cd ..
+
+          # Stable-named copy for website
+          cp "anima-linux-x64-${TAG}.zip" anima-linux-x64.zip
+
+      - name: Upload versioned artifact
         uses: actions/upload-artifact@v4
         with:
-          name: anima-linux-x64
+          name: anima-linux-x64-versioned
+          path: anima-linux-x64-${{ needs.version.outputs.tag }}.zip
+          retention-days: 30
+
+      - name: Upload stable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-linux-x64-stable
           path: anima-linux-x64.zip
           retention-days: 30
 
@@ -183,18 +266,29 @@ jobs:
         run: cargo build --release --bin client --target x86_64-pc-windows-gnu
 
       - name: Package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist/anima
           cp target/x86_64-pc-windows-gnu/release/client.exe dist/anima/anima.exe
           cp -r assets dist/anima/
           echo "${TAG}" > dist/anima/VERSION
-          cd dist && zip -r ../anima-windows-x64.zip anima/
 
-      - name: Upload artifact
+          cd dist && zip -r "../anima-windows-x64-${TAG}.zip" anima/
+          cd ..
+          cp "anima-windows-x64-${TAG}.zip" anima-windows-x64.zip
+
+      - name: Upload versioned artifact
         uses: actions/upload-artifact@v4
         with:
-          name: anima-windows-x64
+          name: anima-windows-x64-versioned
+          path: anima-windows-x64-${{ needs.version.outputs.tag }}.zip
+          retention-days: 30
+
+      - name: Upload stable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-windows-x64-stable
           path: anima-windows-x64.zip
           retention-days: 30
 
@@ -213,7 +307,6 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
-      # Server and Linux client share the same target triple — reuse compiled deps
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -235,17 +328,28 @@ jobs:
         run: cargo build --release --bin server
 
       - name: Package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          TAG="${{ needs.version.outputs.tag }}"
           mkdir -p dist
           cp target/release/server dist/anima-server
           echo "${TAG}" > dist/VERSION
-          cd dist && zip -r ../anima-linux-server.zip anima-server VERSION
 
-      - name: Upload artifact
+          cd dist && zip -r "../anima-linux-server-${TAG}.zip" anima-server VERSION
+          cd ..
+          cp "anima-linux-server-${TAG}.zip" anima-linux-server.zip
+
+      - name: Upload versioned artifact
         uses: actions/upload-artifact@v4
         with:
-          name: anima-linux-server
+          name: anima-linux-server-versioned
+          path: anima-linux-server-${{ needs.version.outputs.tag }}.zip
+          retention-days: 30
+
+      - name: Upload stable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-linux-server-stable
           path: anima-linux-server.zip
           retention-days: 30
 
@@ -263,6 +367,9 @@ jobs:
         with:
           path: artifacts
 
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -276,17 +383,26 @@ jobs:
             **Version:** `${{ needs.version.outputs.version }}` | **Commit:** `${{ needs.version.outputs.short_sha }}` | **Built:** `${{ needs.version.outputs.build_date }}`
 
             ### Downloads
-            | Platform | File |
-            |---|---|
-            | macOS (Apple Silicon) | `anima-macos-arm64.zip` |
-            | Linux (x64) | `anima-linux-x64.zip` |
-            | Windows (x64) | `anima-windows-x64.zip` |
-            | Server (Linux x64) | `anima-linux-server.zip` |
+            | Platform | Versioned | Stable URL |
+            |---|---|---|
+            | **macOS** (Apple Silicon) | `anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg` | `anima-macos-arm64.dmg` |
+            | **Linux** (x64) | `anima-linux-x64-${{ needs.version.outputs.tag }}.zip` | `anima-linux-x64.zip` |
+            | **Windows** (x64) | `anima-windows-x64-${{ needs.version.outputs.tag }}.zip` | `anima-windows-x64.zip` |
+            | Server (Linux x64) | `anima-linux-server-${{ needs.version.outputs.tag }}.zip` | `anima-linux-server.zip` |
+
+            **macOS:** Download the `.dmg`, open it, drag **Anima.app** to Applications.
+            **Windows/Linux:** Extract the `.zip` and run `anima` (or `anima.exe`).
+
+            > Note: macOS builds are not yet code-signed. You may need to right-click → Open on first launch.
           files: |
-            artifacts/anima-macos-arm64/anima-macos-arm64.zip
-            artifacts/anima-linux-x64/anima-linux-x64.zip
-            artifacts/anima-windows-x64/anima-windows-x64.zip
-            artifacts/anima-linux-server/anima-linux-server.zip
+            artifacts/anima-macos-arm64-dmg-versioned/anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg
+            artifacts/anima-macos-arm64-dmg-stable/anima-macos-arm64.dmg
+            artifacts/anima-linux-x64-versioned/anima-linux-x64-${{ needs.version.outputs.tag }}.zip
+            artifacts/anima-linux-x64-stable/anima-linux-x64.zip
+            artifacts/anima-windows-x64-versioned/anima-windows-x64-${{ needs.version.outputs.tag }}.zip
+            artifacts/anima-windows-x64-stable/anima-windows-x64.zip
+            artifacts/anima-linux-server-versioned/anima-linux-server-${{ needs.version.outputs.tag }}.zip
+            artifacts/anima-linux-server-stable/anima-linux-server.zip
 
   # ============================================
   # Deploy server binary to Salt Lake City box
@@ -300,7 +416,7 @@ jobs:
       - name: Download server artifact
         uses: actions/download-artifact@v4
         with:
-          name: anima-linux-server
+          name: anima-linux-server-stable
           path: .
 
       - name: Deploy to game server
@@ -311,17 +427,14 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
           DEPLOY_TAG: ${{ needs.version.outputs.tag }}
         run: |
-          # Write SSH key
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
           SSH_OPTS="-o StrictHostKeyChecking=no -i ~/.ssh/deploy_key -p ${DEPLOY_PORT:-22}"
 
-          # Upload new binary
           scp $SSH_OPTS anima-linux-server.zip "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/anima-linux-server.zip"
 
-          # Run deploy script on server
           ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" "DEPLOY_TAG=${DEPLOY_TAG}" 'bash -s' << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
