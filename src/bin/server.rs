@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use multiplayer::player::{player_physics_bundle, player_replicated_bundle, PLAYER_SPAWN_POS};
+use multiplayer::player::{player_physics_bundle, player_replicated_bundle, select_spawn_point, PLAYER_SPAWN_POS};
 use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerDead, PlayerHealth, PlayerDisplayId};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
@@ -119,6 +119,7 @@ struct PlayerCounter(u32);
 fn handle_connected(
     trigger: On<Add, Connected>,
     query: Query<(&RemoteId, Has<ReplicationSender>), With<ClientOf>>,
+    living_query: Query<&Position, (With<PlayerId>, Without<PlayerDead>)>,
     mut commands: Commands,
     mut counter: ResMut<PlayerCounter>,
 ) {
@@ -147,6 +148,10 @@ fn handle_connected(
         );
     }
 
+    // Pick spawn point furthest from living players
+    let living_positions: Vec<Vec3> = living_query.iter().map(|p| p.0).collect();
+    let spawn_pos = select_spawn_point(&living_positions);
+
     // CS/Valorant-style replication:
     // - Owning client gets prediction (instant local movement, rollback on mismatch)
     // - All other clients get interpolation (smooth, slightly delayed, no rubberbanding)
@@ -157,6 +162,7 @@ fn handle_connected(
         player_replicated_bundle(client_id_bits),
         player_physics_bundle(),
         PlayerDisplayId(display_id),
+        Position(spawn_pos),
         Replicate::to_clients(NetworkTarget::All),
         PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
         InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
@@ -165,6 +171,8 @@ fn handle_connected(
             lifetime: Default::default(),
         },
     ));
+
+    info!("[SPAWN] Player {} spawning at {:?}", display_id, spawn_pos);
 
     // Force-touch all existing players' Positions so lightyear sends fresh snapshots
     // to the new client. Without this, interpolated entities need 2 snapshots to render
@@ -240,10 +248,12 @@ fn check_player_death(
 }
 
 /// Server-only: processes respawn timers. Revives players after delay.
+/// Picks the spawn point furthest from living players to avoid spawn-camping.
 /// This is the hook point for pay-to-respawn (Solana transaction check).
 fn process_respawns(
     mut pending: ResMut<PendingRespawns>,
     mut query: Query<(&mut PlayerHealth, &mut Position, &mut avian3d::prelude::Rotation, &PlayerId), With<PlayerDead>>,
+    living_query: Query<&Position, (With<PlayerId>, Without<PlayerDead>)>,
     mut commands: Commands,
     time: Res<Time>,
 ) {
@@ -258,9 +268,15 @@ fn process_respawns(
             };
 
             if authorize_respawn(player_id.0) {
-                info!("[RESPAWN] Player {:?} (id={}) respawning", entity, player_id.0);
+                let living_positions: Vec<Vec3> = living_query
+                    .iter()
+                    .map(|p| p.0)
+                    .collect();
+                let spawn_pos = select_spawn_point(&living_positions);
+
+                info!("[RESPAWN] Player {:?} (id={}) respawning at {:?}", entity, player_id.0, spawn_pos);
                 health.0 = 100;
-                position.0 = PLAYER_SPAWN_POS;
+                position.0 = spawn_pos;
                 rotation.0 = Quat::IDENTITY;
                 commands.entity(entity).remove::<PlayerDead>();
             }

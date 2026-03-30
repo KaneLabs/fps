@@ -21,6 +21,40 @@ pub const STEP_HEIGHT: f32 = 0.1;
 pub const VIEW_MODEL_RENDER_LAYER: usize = 1;
 pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 2.0, 0.0);
 
+/// Spawn points spread across the map. Used for initial spawn and respawn.
+/// Each position is placed on valid ground with Y offset for the capsule half-height.
+pub const SPAWN_POINTS: &[Vec3] = &[
+    Vec3::new(0.0, 2.0, 0.0),     // Starting room center
+    Vec3::new(-3.5, 2.0, 3.0),    // Starting room — southwest corner
+    Vec3::new(3.5, 2.0, 3.0),     // Starting room — southeast corner
+    Vec3::new(0.0, 2.0, -12.0),   // Between the two jump platforms
+    Vec3::new(-6.0, 4.5, -15.5),  // Top of staircase
+    Vec3::new(6.0, 2.5, -9.0),    // Near ramp base
+    Vec3::new(10.0, 3.5, -16.0),  // Elevated walkway
+    Vec3::new(-0.5, 4.5, -28.0),  // Far stepping stone (highest point)
+];
+
+/// Pick the spawn point furthest from all living players.
+/// Falls back to a random spawn point if no other players exist.
+pub fn select_spawn_point(living_positions: &[Vec3]) -> Vec3 {
+    if living_positions.is_empty() {
+        // No other players — pick a random spawn point
+        let idx = rand::random::<usize>() % SPAWN_POINTS.len();
+        return SPAWN_POINTS[idx];
+    }
+
+    // Pick the spawn point with the greatest minimum distance to any living player
+    SPAWN_POINTS
+        .iter()
+        .max_by(|a, b| {
+            let min_dist_a = living_positions.iter().map(|p| a.distance(*p)).fold(f32::MAX, f32::min);
+            let min_dist_b = living_positions.iter().map(|p| b.distance(*p)).fold(f32::MAX, f32::min);
+            min_dist_a.partial_cmp(&min_dist_b).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+        .unwrap_or(PLAYER_SPAWN_POS)
+}
+
 /// Capsule dimensions (must match Collider in physics bundle)
 const CAPSULE_RADIUS: f32 = 0.5;
 const CAPSULE_HEIGHT: f32 = 1.0;
