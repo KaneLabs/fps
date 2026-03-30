@@ -111,8 +111,8 @@ jobs:
               -e "s|<string>anima</string>|<string>anima-launcher</string>|" \
               macos/Info.plist.template > "${CONTENTS}/Info.plist"
 
-          # Icon — generate .icns from cover art
-          bash macos/create-icns.sh assets/images/anima-cover.png "${CONTENTS}/Resources/AppIcon.icns"
+          # Icon — use pre-built .icns (generated from anima-cover.png face crop)
+          cp assets/AppIcon.icns "${CONTENTS}/Resources/AppIcon.icns"
 
           # Version file
           echo "${TAG}" > "${CONTENTS}/Resources/VERSION"
