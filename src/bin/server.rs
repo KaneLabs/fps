@@ -192,23 +192,6 @@ fn handle_connected(
     .insert(Position(spawn_pos));
 
     info!("[SPAWN] Player {} spawning at {:?}", display_id, spawn_pos);
-
-    // Force-touch all existing players' Positions so lightyear sends fresh snapshots
-    // to the new client. Without this, interpolated entities need 2 snapshots to render
-    // and a stationary player never generates a second one.
-    commands.queue(ForcePositionUpdate);
-}
-
-/// Command that force-touches all player Positions so lightyear marks them as changed.
-struct ForcePositionUpdate;
-
-impl Command for ForcePositionUpdate {
-    fn apply(self, world: &mut World) {
-        let mut query = world.query_filtered::<&mut Position, With<PlayerId>>();
-        for mut pos in query.iter_mut(world) {
-            pos.set_changed();
-        }
-    }
 }
 
 // ========================================

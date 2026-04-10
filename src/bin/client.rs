@@ -411,11 +411,9 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
 // ========================================
 
 fn loading_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let handles = vec![
-        asset_server.load("ak47.glb"),
-        asset_server.load("dirty-pickaxe.glb"),
-        asset_server.load("ore_chunk.glb"),
-    ];
+    // Don't preload raw .glb files — Bevy auto-spawns their default scenes at origin.
+    // Models are loaded on demand by init_replicated_equippables/interactables via Scene(0).
+    let handles: Vec<Handle<Gltf>> = vec![];
     commands.insert_resource(AssetLoadTracker { handles });
 
     // Preload the Anima cover image for the menu
@@ -916,7 +914,7 @@ fn inventory_hud(
                 if let Some(ref name) = equipped.0 {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("▸")
+                            egui::RichText::new(">")
                                 .font(chakra(13.0))
                                 .color(egui::Color32::from_rgb(100, 160, 255)),
                         );

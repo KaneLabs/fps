@@ -1596,7 +1596,7 @@ pub fn init_replicated_equippables(
     asset_server: Res<AssetServer>,
 ) {
     for (entity, equippable, pos, rot) in query.iter() {
-        info!("init_replicated_equippables: {} at {:?}", equippable.name, pos.0);
+        info!("init_replicated_equippables: {} at {:?} entity={:?}", equippable.name, pos.0, entity);
 
         let model = asset_server
             .load(GltfAssetLabel::Scene(0).from_asset(equippable.model_path.clone()));
@@ -1630,7 +1630,6 @@ pub fn init_replicated_interactables(
                 .with_rotation(rot.0)
                 .with_scale(Vec3::splat(interactable.scale)),
             Visibility::default(),
-            Collider::cuboid(0.5, 0.5, 0.5),
             RenderLayers::from_layers(&[DEFAULT_RENDER_LAYER]),
         ));
     }
@@ -1665,16 +1664,14 @@ pub fn sync_equippable_visibility(
 }
 
 /// Client-only: syncs equippable Transform with replicated Position.
-/// Without this, dropped/death-dropped items appear at their original spawn location.
+/// Lightyear doesn't sync Position→Transform for non-predicted world objects.
 pub fn sync_equippable_position(
     mut query: Query<(&Position, &Rotation, &mut Transform, &Equippable), Changed<Position>>,
 ) {
     for (pos, rot, mut transform, equippable) in query.iter_mut() {
         transform.translation = pos.0;
         transform.rotation = rot.0;
-        // Preserve scale
-        let scale = equippable.scale;
-        transform.scale = Vec3::splat(scale);
+        transform.scale = Vec3::splat(equippable.scale);
     }
 }
 
