@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
+cd "$DIR"
+exec "$(dirname "$0")/anima" "$@"
