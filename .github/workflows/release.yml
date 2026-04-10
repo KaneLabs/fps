@@ -132,13 +132,17 @@ jobs:
           # Create Applications symlink for drag-to-install
           ln -s /Applications dmg-staging/Applications
 
-          # Create the DMG
-          hdiutil create \
-            -volname "Anima ${TAG}" \
-            -srcfolder dmg-staging \
-            -ov \
-            -format UDZO \
-            "${DMG_NAME}"
+          # Create the DMG (retry — hdiutil can fail with "Resource busy" on CI runners)
+          for i in 1 2 3; do
+            hdiutil create \
+              -volname "Anima ${TAG}" \
+              -srcfolder dmg-staging \
+              -ov \
+              -format UDZO \
+              "${DMG_NAME}" && break
+            echo "hdiutil attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
 
           # Stable-named copy for website
           cp "${DMG_NAME}" "${DMG_STABLE}"
