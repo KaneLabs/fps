@@ -158,8 +158,126 @@ jobs:
           path: anima-macos-arm64.dmg
           retention-days: 30
 
-  # Linux + Windows client builds disabled for now — macOS only for MVP
-  # Re-enable when needed by uncommenting and adding back to release.needs
+  # ============================================
+  # Linux x64 client
+  # ============================================
+  build-linux-client:
+    needs: [version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release
+          shared-key: linux-x64-client
+          cache-targets: true
+          cache-all-crates: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libvulkan-dev
+
+      - name: Build client
+        env:
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
+        run: cargo build --release --bin client
+
+      - name: Package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir -p dist/anima
+          cp target/release/client dist/anima/anima
+          cp -r assets dist/anima/
+          echo "${TAG}" > dist/anima/VERSION
+
+          cd dist && zip -r "../anima-linux-x64-${TAG}.zip" anima/
+          cd ..
+          cp "anima-linux-x64-${TAG}.zip" anima-linux-x64.zip
+
+      - name: Upload versioned artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-linux-x64-versioned
+          path: anima-linux-x64-${{ needs.version.outputs.tag }}.zip
+          retention-days: 30
+
+      - name: Upload stable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-linux-x64-stable
+          path: anima-linux-x64.zip
+          retention-days: 30
+
+  # ============================================
+  # Windows x64 client (cross-compile from Linux)
+  # ============================================
+  build-windows-client:
+    needs: [version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release
+          shared-key: windows-x64-client
+          cache-targets: true
+          cache-all-crates: true
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      - name: Build client
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          ANIMA_VERSION: ${{ needs.version.outputs.tag }}
+          ANIMA_BUILD_SHA: ${{ needs.version.outputs.short_sha }}
+          ANIMA_BUILD_DATE: ${{ needs.version.outputs.build_date }}
+        run: cargo build --release --bin client --target x86_64-pc-windows-gnu
+
+      - name: Package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir -p dist/anima
+          cp target/x86_64-pc-windows-gnu/release/client.exe dist/anima/anima.exe
+          cp -r assets dist/anima/
+          echo "${TAG}" > dist/anima/VERSION
+
+          cd dist && zip -r "../anima-windows-x64-${TAG}.zip" anima/
+          cd ..
+          cp "anima-windows-x64-${TAG}.zip" anima-windows-x64.zip
+
+      - name: Upload versioned artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-windows-x64-versioned
+          path: anima-windows-x64-${{ needs.version.outputs.tag }}.zip
+          retention-days: 30
+
+      - name: Upload stable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-windows-x64-stable
+          path: anima-windows-x64.zip
+          retention-days: 30
 
   # ============================================
   # Linux x64 server (headless)
@@ -223,7 +341,7 @@ jobs:
   # Create GitHub Release with all artifacts
   # ============================================
   release:
-    needs: [version, build-macos-client, build-linux-server]
+    needs: [version, build-macos-client, build-linux-client, build-windows-client, build-linux-server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -252,11 +370,18 @@ jobs:
             | Platform | File |
             |---|---|
             | **macOS** (Apple Silicon) | `anima-macos-arm64.dmg` |
+            | **Linux** (x64) | `anima-linux-x64.zip` |
+            | **Windows** (x64) | `anima-windows-x64.zip` |
 
             **macOS:** Download the `.dmg`, open it, drag **Anima.app** to Applications. Right-click → Open on first launch (not yet code-signed).
+            **Windows/Linux:** Extract the `.zip` and run `anima` (or `anima.exe`).
           files: |
             artifacts/anima-macos-arm64-dmg-versioned/anima-macos-arm64-${{ needs.version.outputs.tag }}.dmg
             artifacts/anima-macos-arm64-dmg-stable/anima-macos-arm64.dmg
+            artifacts/anima-linux-x64-versioned/anima-linux-x64-${{ needs.version.outputs.tag }}.zip
+            artifacts/anima-linux-x64-stable/anima-linux-x64.zip
+            artifacts/anima-windows-x64-versioned/anima-windows-x64-${{ needs.version.outputs.tag }}.zip
+            artifacts/anima-windows-x64-stable/anima-windows-x64.zip
             artifacts/anima-linux-server-versioned/anima-linux-server-${{ needs.version.outputs.tag }}.zip
             artifacts/anima-linux-server-stable/anima-linux-server.zip
 
