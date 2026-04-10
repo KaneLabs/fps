@@ -93,11 +93,11 @@ jobs:
 
           # Wrapper script: cd to Resources so the binary finds assets/
           cat > "${CONTENTS}/MacOS/anima-launcher" << 'LAUNCHER'
-          #!/usr/bin/env bash
-          DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
-          cd "$DIR"
-          exec "$(dirname "$0")/anima" "$@"
-          LAUNCHER
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
+cd "$DIR"
+exec "$(dirname "$0")/anima" "$@"
+LAUNCHER
           chmod +x "${CONTENTS}/MacOS/anima-launcher"
 
           # Update Info.plist to use the launcher
