@@ -18,7 +18,7 @@ use multiplayer::world::{
     spawn_lights, spawn_world_model, update_view_model, WorldModelCamera, DEFAULT_RENDER_LAYER,
     interaction_ui_system, init_replicated_doors, init_replicated_equippables,
     init_replicated_interactables, sync_door_state, sync_equippable_position, sync_equippable_visibility,
-    sync_remote_equipped, spawn_tracer, cleanup_tracers,
+    sync_remote_equipped, spawn_tracer, cleanup_tracers, remote_shot_tracers,
     start_jab_animation, animate_jab, LeftHand,
 };
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
@@ -149,7 +149,7 @@ fn main() {
 
     app.add_systems(
         Update,
-        (cleanup_tracers, animate_jab, health_hud, inventory_hud, death_screen, kill_feed_ui, build_version_hud, log_health_changes)
+        (cleanup_tracers, remote_shot_tracers, animate_jab, crosshair_hud, health_hud, inventory_hud, death_screen, kill_feed_ui, build_version_hud, log_health_changes)
             .run_if(in_state(AppState::InGame)),
     );
 
@@ -878,6 +878,40 @@ fn health_hud(
                 egui::Color32::WHITE,
             );
         });
+}
+
+/// Crosshair — small cross at screen center when a gun is equipped.
+fn crosshair_hud(
+    mut contexts: EguiContexts,
+    player_query: Query<&PlayerEquipped, With<Controlled>>,
+) {
+    let Ok(equipped) = player_query.single() else { return; };
+    let Some(ref name) = equipped.0 else { return; };
+    // Only show crosshair for guns
+    if !(name.contains("AK") || name.contains("ak") || name.contains("gun")) {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else { return; };
+    let screen = ctx.screen_rect();
+    let center = egui::pos2(screen.width() / 2.0, screen.height() / 2.0);
+    let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180);
+    let stroke = egui::Stroke::new(1.5, color);
+    let size = 8.0;
+    let gap = 3.0;
+
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("crosshair"),
+    ));
+
+    // Horizontal lines
+    painter.line_segment([egui::pos2(center.x - size, center.y), egui::pos2(center.x - gap, center.y)], stroke);
+    painter.line_segment([egui::pos2(center.x + gap, center.y), egui::pos2(center.x + size, center.y)], stroke);
+    // Vertical lines
+    painter.line_segment([egui::pos2(center.x, center.y - size), egui::pos2(center.x, center.y - gap)], stroke);
+    painter.line_segment([egui::pos2(center.x, center.y + gap), egui::pos2(center.x, center.y + size)], stroke);
+    // Center dot
+    painter.circle_filled(center, 1.0, color);
 }
 
 /// Inventory HUD — bottom-left, shows equipped item and carried inventory.

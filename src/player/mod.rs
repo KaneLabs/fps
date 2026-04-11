@@ -117,6 +117,7 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
         crate::protocol::PlayerInventory::default(),
         PlayerHealth::default(),
         crate::protocol::LastDamagedBy::default(),
+        crate::protocol::LastShot::default(),
         CharacterVelocity::default(),
         Position(PLAYER_SPAWN_POS),
         Rotation::default(),

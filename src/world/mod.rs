@@ -84,6 +84,41 @@ pub fn spawn_tracer(
     ));
 }
 
+/// Client-only: spawns tracers for remote players when their LastShot changes.
+pub fn remote_shot_tracers(
+    query: Query<&crate::protocol::LastShot, (Changed<crate::protocol::LastShot>, With<Interpolated>)>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    time: Res<Time>,
+) {
+    for shot in query.iter() {
+        if shot.tick == 0 { continue; } // default, no shot yet
+        // Spawn tracer
+        let diff = shot.hit_point - shot.muzzle;
+        let length = diff.length();
+        if length < 0.01 { continue; }
+        let dir = diff / length;
+        let midpoint = shot.muzzle + dir * (length / 2.0);
+        let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(0.01, length))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.1, 0.1),
+                emissive: bevy::color::LinearRgba::new(5.0, 0.2, 0.2, 1.0),
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_translation(midpoint).with_rotation(rotation),
+            BulletTracer {
+                spawn_time: time.elapsed_secs(),
+                lifetime: 0.08,
+            },
+        ));
+    }
+}
+
 /// Client-only: despawns tracers after their lifetime expires.
 pub fn cleanup_tracers(
     query: Query<(Entity, &BulletTracer)>,
@@ -1851,6 +1886,7 @@ pub fn shared_primary_action(
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_shot: Local<f32>,
+    mut shot_counter: Local<u32>,
     time: Res<Time>,
 ) {
     let Ok((player_pos, yaw, pitch, equipped, attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
@@ -1936,6 +1972,14 @@ pub fn shared_primary_action(
             commands.trigger(ShotFired {
                 muzzle: muzzle_world,
                 hit_point,
+            });
+
+            // Set LastShot on the player entity so remote clients can see the tracer
+            *shot_counter += 1;
+            commands.entity(trigger.context).insert(crate::protocol::LastShot {
+                muzzle: muzzle_world,
+                hit_point,
+                tick: *shot_counter,
             });
         }
 

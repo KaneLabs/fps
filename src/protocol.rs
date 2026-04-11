@@ -141,6 +141,15 @@ pub struct PlayerDisplayId(pub u32);
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct LastDamagedBy(pub u64);
 
+/// Replicated shot event — server sets this when a player fires.
+/// Client watches for changes on remote players to spawn tracers.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct LastShot {
+    pub muzzle: Vec3,
+    pub hit_point: Vec3,
+    pub tick: u32,
+}
+
 /// Marker: player is dead. Server-authoritative, replicated.
 /// While dead: input is ignored, player cannot move/shoot/interact.
 /// Removed by server on respawn (after timer + future payment gate).
@@ -221,6 +230,7 @@ impl Plugin for ProtocolPlugin {
             .add_prediction();
         app.register_component::<PlayerInventory>();
         app.register_component::<PlayerHealth>();
+        app.register_component::<LastShot>();
         app.register_component::<PlayerDisplayId>();
         app.register_component::<LastDamagedBy>();
         app.register_component::<PlayerDead>();
