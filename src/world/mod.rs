@@ -337,8 +337,12 @@ pub fn spawn_world_physics(mut commands: Commands) {
     sc(&mut commands, Vec3::new(0.0, 0.05, 0.0), Vec3::new(20.0, 0.1, 16.0), 0.4);
 
     // Eastern hillside (stepped terrain rising toward mine)
+    // Ground level — full width but stops before mine tunnel entrance
     sc(&mut commands, Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0), 0.6);
-    sc(&mut commands, Vec3::new(24.0, 1.5, -8.0), Vec3::new(8.0, 3.0, 18.0), 0.6);
+    // Mid-level — split to leave gap for mine entrance (tunnel is x=20.5-23.5, z=-2 to -10)
+    sc(&mut commands, Vec3::new(24.0, 1.5, -14.0), Vec3::new(8.0, 3.0, 6.0), 0.6);  // behind mine
+    sc(&mut commands, Vec3::new(27.0, 1.5, -4.0), Vec3::new(4.0, 3.0, 10.0), 0.6);  // right of mine
+    // High ridge — far back
     sc(&mut commands, Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0), 0.6);
 
     // Western ridge (gentle slope)

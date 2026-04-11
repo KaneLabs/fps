@@ -26,7 +26,7 @@ pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 1.5, 5.0);
 pub const SPAWN_POINTS: &[Vec3] = &[
     Vec3::new(0.0, 1.5, 5.0),      // Cabin porch (default spawn)
     Vec3::new(-14.0, 1.2, 2.0),    // Inside the equipment shed
-    Vec3::new(22.0, 1.8, -4.0),    // Mine entrance
+    Vec3::new(19.0, 1.5, -2.0),    // Outside mine entrance
     Vec3::new(-7.5, 4.8, -7.5),    // Watchtower platform
     Vec3::new(3.0, 1.0, 10.0),     // Campfire area
     Vec3::new(-10.0, 1.5, -15.0),  // NW boulder cluster
