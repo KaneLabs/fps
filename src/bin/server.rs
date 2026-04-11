@@ -84,6 +84,7 @@ fn main() {
     // Client handling
     app.add_observer(handle_new_client);
     app.add_observer(handle_connected);
+    app.add_observer(handle_disconnected);
 
     app.run();
 }
@@ -192,6 +193,28 @@ fn handle_connected(
     .insert(Position(spawn_pos));
 
     info!("[SPAWN] Player {} spawning at {:?}", display_id, spawn_pos);
+}
+
+/// When a client disconnects, clean up server state.
+/// Lightyear auto-despawns SessionBased controlled entities (the player),
+/// but we need to clean up VerifiedWallets and log the event.
+fn handle_disconnected(
+    trigger: On<Add, Disconnected>,
+    query: Query<&RemoteId, With<ClientOf>>,
+    mut verified_wallets: ResMut<VerifiedWallets>,
+) {
+    let entity = trigger.entity;
+    let Ok(remote_id) = query.get(entity) else {
+        return;
+    };
+
+    let client_id = remote_id.0.to_bits();
+    info!("[DISCONNECT] Client {} (entity={:?}) disconnected", client_id, entity);
+
+    // Remove from verified wallets
+    if verified_wallets.remove(client_id) {
+        info!("[DISCONNECT] Removed wallet verification for client {}", client_id);
+    }
 }
 
 // ========================================

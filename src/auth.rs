@@ -234,6 +234,12 @@ impl VerifiedWallets {
     pub fn get_address(&self, client_id: u64) -> Option<&str> {
         self.wallets.get(&client_id).map(|s| s.as_str())
     }
+
+    /// Remove a client's wallet verification (on disconnect).
+    /// Returns true if the client was previously verified.
+    pub fn remove(&mut self, client_id: u64) -> bool {
+        self.wallets.remove(&client_id).is_some()
+    }
 }
 
 #[cfg(test)]
