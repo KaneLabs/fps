@@ -4833,6 +4833,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "lightyear",
+ "lightyear_avian3d",
  "rand 0.8.5",
  "serde",
  "serde_json",

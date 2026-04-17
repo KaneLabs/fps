@@ -2,12 +2,16 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy_enhanced_input::prelude::Fire;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use lightyear::interpolation::plugin::InterpolationDelay;
+use lightyear_avian3d::prelude::{LagCompensationHistory, LagCompensationPlugin, LagCompensationSpatialQuery};
+use avian3d::prelude::SpatialQueryFilter;
 
 use multiplayer::auth::{self, VerifiedWallets};
 use multiplayer::player::{player_physics_bundle, player_replicated_bundle, select_spawn_point, PLAYER_SPAWN_POS};
-use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerDead, PlayerEquipped, PlayerHealth, PlayerDisplayId, PlayerInventory, WalletAuthMessage};
+use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerId, PlayerDead, PlayerEquipped, PlayerHealth, PlayerDisplayId, PlayerInventory, PlayerYaw, PlayerPitch, PrimaryAction, WalletAuthMessage};
 use multiplayer::solana::{self, RespawnAuth, RespawnConfig, WalletAddress};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics, Equippable};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
@@ -62,6 +66,10 @@ fn main() {
     // Shared: protocol, physics, frame interpolation, movement observer
     app.add_plugins(SharedPlugin);
 
+    // Lag compensation — maintains collider history so hits can be rewound
+    // to where targets were when the client saw them
+    app.add_plugins(LagCompensationPlugin);
+
     // World — physics only, no rendering on headless server
     app.add_systems(Startup, spawn_world_physics);
     app.add_systems(Startup, spawn_server);
@@ -85,6 +93,9 @@ fn main() {
     app.add_observer(handle_new_client);
     app.add_observer(handle_connected);
     app.add_observer(handle_disconnected);
+
+    // Lag-compensated hitscan damage
+    app.add_observer(server_shoot_with_lag_comp);
 
     app.run();
 }
@@ -120,7 +131,7 @@ fn handle_new_client(trigger: On<Add, LinkOf>, mut commands: Commands) {
     info!("New client link: {:?}", entity);
     commands.entity(entity).insert((
         ReplicationSender::new(
-            Duration::from_millis(100),
+            Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
             SendUpdatesMode::SinceLastAck,
             false,
         ),
@@ -188,6 +199,9 @@ fn handle_connected(
             owner: entity,
             lifetime: Default::default(),
         },
+        // Lag compensation: server keeps a history of this collider's position/rotation
+        // so hitscan from remote shooters can be rewound to where the client saw them
+        LagCompensationHistory::default(),
     ))
     // Set spawn position after spawn — player_replicated_bundle already includes Position
     .insert(Position(spawn_pos));
@@ -214,6 +228,84 @@ fn handle_disconnected(
     // Remove from verified wallets
     if verified_wallets.remove(client_id) {
         info!("[DISCONNECT] Removed wallet verification for client {}", client_id);
+    }
+}
+
+/// Server-only observer: handles hitscan damage with lag compensation.
+/// The shared observer in world/mod.rs handles tracer prediction on the client.
+/// This observer runs on the server and uses the shooter's InterpolationDelay to
+/// rewind targets to where they were when the client saw them.
+fn server_shoot_with_lag_comp(
+    trigger: On<Fire<PrimaryAction>>,
+    player_query: Query<(
+        &Position,
+        &PlayerYaw,
+        &PlayerPitch,
+        &PlayerEquipped,
+        &PlayerId,
+        Option<&ControlledBy>,
+    )>,
+    client_query: Query<&InterpolationDelay, With<ClientOf>>,
+    mut health_query: Query<(&mut PlayerHealth, Option<&mut LastDamagedBy>)>,
+    lag_query: LagCompensationSpatialQuery,
+    mut last_shot: Local<std::collections::HashMap<Entity, f32>>,
+    time: Res<Time>,
+) {
+    let shooter = trigger.context;
+    let Ok((pos, yaw, pitch, equipped, attacker_id, controlled_by)) = player_query.get(shooter) else {
+        return;
+    };
+
+    // Only run for gun shots
+    let Some(ref name) = equipped.0 else { return; };
+    if !(name.contains("AK") || name.contains("ak") || name.contains("gun")) {
+        return;
+    }
+
+    // Cooldown per shooter
+    let current = time.elapsed_secs();
+    let last = last_shot.get(&shooter).copied().unwrap_or(-10.0);
+    if current - last < multiplayer::world::SHOOT_COOLDOWN {
+        return;
+    }
+    last_shot.insert(shooter, current);
+
+    // Get the shooter's InterpolationDelay so we know how far back to rewind
+    let Some(controlled) = controlled_by else {
+        warn!("[SHOOT-SERVER] Shooter {:?} has no ControlledBy", shooter);
+        return;
+    };
+    let Ok(delay) = client_query.get(controlled.owner) else {
+        warn!("[SHOOT-SERVER] No InterpolationDelay for client {:?}", controlled.owner);
+        return;
+    };
+
+    let eye_pos = pos.0 + Vec3::Y * 0.8;
+    let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
+    let mut filter = SpatialQueryFilter::from_excluded_entities([shooter]);
+
+    if let Some(hit) = lag_query.cast_ray(
+        *delay,
+        eye_pos,
+        Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
+        multiplayer::world::SHOOT_RANGE,
+        true,
+        &mut filter,
+    ) {
+        info!(
+            "[SHOOT-SERVER] Lag-comp hit entity {:?} at distance {:.1}",
+            hit.entity, hit.distance
+        );
+        if let Ok((mut health, last_damaged)) = health_query.get_mut(hit.entity) {
+            health.0 -= multiplayer::world::SHOOT_DAMAGE;
+            if let Some(mut last) = last_damaged {
+                last.0 = attacker_id.0;
+            }
+            info!(
+                "[SHOOT-SERVER] Player hit! {} damage applied, health now: {}",
+                multiplayer::world::SHOOT_DAMAGE, health.0
+            );
+        }
     }
 }
 

@@ -762,7 +762,7 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
             ReplicationReceiver::default(),
             PredictionManager::default(),
             ReplicationSender::new(
-                Duration::from_millis(100),
+                Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
                 SendUpdatesMode::SinceLastAck,
                 false,
             ),

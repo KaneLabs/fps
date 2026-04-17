@@ -41,6 +41,7 @@ bevy = {version = "0.18", default-features = false, features = [
 ]}
 
 lightyear = {version = "0.26", features = ["netcode", "udp", "input_bei", "avian3d", "frame_interpolation"]}
+lightyear_avian3d = {version = "0.26", features = ["3d", "lag_compensation"]}
 avian3d = {version = "0.5", default-features = false, features = ["3d", "f32", "parry-f32", "serialize"]}
 bevy_enhanced_input = {version = "0.22", features = ["serialize"]}
 bevy_egui = "0.39"

@@ -199,6 +199,9 @@ impl Plugin for ProtocolPlugin {
         app.add_plugins(InputPlugin::<PlayerContext> {
             config: InputConfig::<PlayerContext> {
                 rebroadcast_inputs: true,
+                // Include the client's InterpolationDelay in input messages
+                // so the server can rewind to where the client saw targets when shooting
+                lag_compensation: true,
                 ..default()
             },
         });

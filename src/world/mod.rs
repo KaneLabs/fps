@@ -1881,7 +1881,7 @@ pub fn shared_primary_action(
     trigger: On<Fire<PrimaryAction>>,
     player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, &crate::protocol::PlayerId, Has<Predicted>, Has<Interpolated>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
-    mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
+    health_query: Query<(Entity, &PlayerHealth, &Position)>,
     equippable_query: Query<&Equippable>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
@@ -1889,7 +1889,7 @@ pub fn shared_primary_action(
     mut shot_counter: Local<u32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, equipped, attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
+    let Ok((player_pos, yaw, pitch, equipped, _attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
         return;
     };
     if is_interpolated { return; }
@@ -1916,7 +1916,7 @@ pub fn shared_primary_action(
 
             // Log all players with colliders for debugging hit detection
             if !is_predicted {
-                for (e, hp, pos, _) in health_query.iter() {
+                for (e, hp, pos) in health_query.iter() {
                     info!(
                         "[SHOOT] Potential target: {:?} pos={:?} hp={} dist={:.1}",
                         e, pos.0, hp.0, eye_pos.distance(pos.0)
@@ -1926,6 +1926,8 @@ pub fn shared_primary_action(
 
             let tracer_dist;
 
+            // Client-side prediction: ray-cast against local view for tracer visuals.
+            // Server damage is handled by server_compute_shot_hit with lag compensation.
             if let Some(hit) = spatial_query.cast_ray(
                 eye_pos,
                 Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
@@ -1938,20 +1940,6 @@ pub fn shared_primary_action(
                     "[SHOOT] Ray hit entity {:?} at distance {:.1}",
                     hit.entity, hit.distance
                 );
-                if !is_predicted {
-                    if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
-                        health.0 -= SHOOT_DAMAGE;
-                        if let Some(mut last) = last_damaged {
-                            last.0 = attacker_id.0;
-                        }
-                        info!(
-                            "[SHOOT] Player hit! {} damage applied, health now: {}",
-                            SHOOT_DAMAGE, health.0
-                        );
-                    } else {
-                        info!("[SHOOT] Hit entity {:?} but it has no PlayerHealth", hit.entity);
-                    }
-                }
             } else {
                 tracer_dist = SHOOT_RANGE;
                 info!("[SHOOT] Miss — no ray hit within {} range", SHOOT_RANGE);
@@ -2048,9 +2036,9 @@ pub fn shared_primary_action(
     }
 }
 
-const SHOOT_DAMAGE: i32 = 25;
-const SHOOT_RANGE: f32 = 500.0;
-const SHOOT_COOLDOWN: f32 = 0.15;
+pub const SHOOT_DAMAGE: i32 = 25;
+pub const SHOOT_RANGE: f32 = 500.0;
+pub const SHOOT_COOLDOWN: f32 = 0.15;
 
 /// Shared system: resets mining state on interactables that haven't been mined recently.
 /// Runs every FixedUpdate. If `last_mine_secs` is stale (>0.05s ago), clears mining state.
