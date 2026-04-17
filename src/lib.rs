@@ -45,28 +45,30 @@ impl Plugin for SharedPlugin {
         // Note: FrameInterpolationPlugin is NOT needed — PositionButInterpolateTransform
         // mode handles Position→Transform and Rotation→Transform sync with smooth correction.
 
-        // Zero XZ velocity every tick; Fire<MoveAction> re-applies if keys are held.
-        app.add_systems(FixedFirst, player::clear_xz_velocity);
-
-        // Kinematic character controller: gravity, ground detection, move-and-slide.
-        app.add_systems(FixedUpdate, player::character_controller);
-
-        // Sync PlayerYaw+PlayerPitch → Rotation for all players. Runs on both client (prediction)
-        // and server (authority). Lightyear's Avian plugin syncs Rotation → Transform for rendering.
-        app.add_systems(FixedUpdate, player::sync_rotation_from_yaw);
-
-        // Reset stale mining state (detects when player stops holding mine button)
-        app.add_systems(FixedUpdate, world::reset_stale_mining);
-
-        // Shared observers (fire on both client predicted + server authoritative via BEI replay)
-        app.add_observer(player::shared_look);
-        app.add_observer(player::shared_movement);
-        app.add_observer(player::shared_jump);
-        app.add_observer(world::shared_door_interact);
-        app.add_observer(world::shared_equip_interact);
-        app.add_observer(world::shared_drop);
-        app.add_observer(world::shared_jab);
-        app.add_observer(world::shared_primary_action);
-
+        // Shared FixedUpdate systems. These replace the old BEI `On<Fire<...>>`
+        // observers — leafwing's ActionState is snapshot/restored cleanly during
+        // lightyear rollback, so movement/look/jump/interact/etc can be replayed
+        // without the rubber-banding that event-based observers caused.
+        //
+        // Movement reads the world-space Move axis (rotated on the client before
+        // BufferClientInputs). With zero input the movement system zeros XZ vel
+        // directly — no separate clear_xz_velocity step required.
+        app.add_systems(
+            FixedUpdate,
+            (
+                player::shared_look_system,
+                player::shared_movement_system,
+                player::shared_jump_system,
+                player::character_controller,
+                player::sync_rotation_from_yaw,
+                world::shared_door_interact_system,
+                world::shared_equip_interact_system,
+                world::shared_drop_system,
+                world::shared_jab_system,
+                world::shared_primary_action_system,
+                world::reset_stale_mining,
+            )
+                .chain(),
+        );
     }
 }

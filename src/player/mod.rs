@@ -2,16 +2,18 @@ use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
 use bevy::{
-    input::mouse::AccumulatedMouseMotion,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use bevy_enhanced_input::prelude::*;
+use leafwing_input_manager::prelude::*;
 
 use avian3d::prelude::Rotation;
 use lightyear::prelude::{Controlled, Interpolated};
 
-use crate::protocol::{CharacterVelocity, JumpAction, LookAction, MoveAction, PlayerContext, PlayerDead, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
+use crate::protocol::{
+    CharacterVelocity, PlayerActions, PlayerDead, PlayerEquipped, PlayerHealth, PlayerId,
+    PlayerPitch, PlayerYaw,
+};
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
 pub const JUMP_SPEED: f32 = 10.0;
@@ -107,11 +109,15 @@ pub fn player_physics_bundle() -> impl Bundle {
 
 /// Replicated gameplay state for a player entity.
 /// Server spawns these; client receives them via lightyear replication.
+///
+/// `ActionState<PlayerActions>` is the leafwing equivalent of the old BEI
+/// `PlayerContext` marker — it's the replicated input component queried each
+/// FixedUpdate by shared movement/shoot/etc systems on both ends.
 pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
     (
-        PlayerContext,
-        crate::protocol::PlayerId(client_id),
-        crate::protocol::PlayerYaw::default(),
+        ActionState::<PlayerActions>::default(),
+        PlayerId(client_id),
+        PlayerYaw::default(),
         PlayerPitch::default(),
         PlayerEquipped::default(),
         crate::protocol::PlayerInventory::default(),
@@ -124,71 +130,103 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
     )
 }
 
-// --- Shared Movement (observer, runs on both client + server) ---
+// --- Shared Movement (FixedUpdate, runs on both client + server) ---
 
-/// Handles MoveAction fire events. Input is already in world-space
-/// (pre-rotated by camera yaw on the client before BEI buffers it).
-pub fn shared_movement(
-    trigger: On<Fire<MoveAction>>,
-    mut query: Query<(&mut CharacterVelocity, Has<Interpolated>, Has<PlayerDead>)>,
+/// Reads the Move dual-axis from each player's ActionState and applies it to their
+/// CharacterVelocity. Input is already world-space (pre-rotated by camera yaw on
+/// the client before lightyear buffers the ActionState for replication).
+///
+/// Runs every FixedUpdate on both client (prediction) and server (authority).
+/// Leafwing's ActionState is snapshot/restored cleanly across rollback — so this
+/// system can be called during replay without the rubber-banding that plagued BEI.
+pub fn shared_movement_system(
+    mut query: Query<
+        (&ActionState<PlayerActions>, &mut CharacterVelocity, Has<Interpolated>, Has<PlayerDead>),
+        With<PlayerId>,
+    >,
 ) {
-    let input = trigger.value;
+    for (action, mut vel, is_interpolated, is_dead) in query.iter_mut() {
+        if is_interpolated || is_dead {
+            continue;
+        }
 
-    if let Ok((mut vel, is_interpolated, is_dead)) = query.get_mut(trigger.context) {
-        if is_interpolated || is_dead { return; }
+        let input = action.axis_pair(&PlayerActions::Move);
+
         if input == Vec2::ZERO {
             vel.0.x = 0.0;
             vel.0.z = 0.0;
-            return;
+            continue;
         }
 
-        let move_dir = Vec2::new(input.x, input.y).normalize_or_zero();
+        let move_dir = input.normalize_or_zero();
         vel.0.x = move_dir.x * PLAYER_MOVE_SPEED;
         vel.0.z = move_dir.y * PLAYER_MOVE_SPEED;
     }
 }
 
-/// Zeros XZ velocity every fixed tick. Fire<MoveAction> re-applies if keys are held.
-pub fn clear_xz_velocity(
-    mut query: Query<&mut CharacterVelocity, (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
+/// Jump: set upward velocity if grounded. Shared between client + server.
+/// Triggered by just_pressed(Jump) so a single keypress fires one jump even
+/// though the key may be held across multiple ticks.
+pub fn shared_jump_system(
+    mut query: Query<
+        (Entity, &ActionState<PlayerActions>, &mut CharacterVelocity, &Position, Has<Interpolated>, Has<PlayerDead>),
+        With<PlayerId>,
+    >,
+    spatial_query: SpatialQuery,
 ) {
-    for mut vel in query.iter_mut() {
-        vel.0.x = 0.0;
-        vel.0.z = 0.0;
+    for (entity, action, mut vel, position, is_interpolated, is_dead) in query.iter_mut() {
+        if is_interpolated || is_dead {
+            continue;
+        }
+        if !action.just_pressed(&PlayerActions::Jump) {
+            continue;
+        }
+        if vel.0.y > 0.5 {
+            continue;
+        }
+
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let config = ShapeCastConfig {
+            max_distance: 0.15,
+            target_distance: SKIN_WIDTH,
+            compute_contact_on_penetration: true,
+            ignore_origin_penetration: true,
+        };
+        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+
+        if let Some(hit) = spatial_query.cast_shape(
+            &capsule, position.0, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
+        ) {
+            if hit.normal1.y > MIN_GROUND_NORMAL_Y {
+                vel.0.y = JUMP_SPEED;
+            }
+        }
     }
 }
 
-/// Jump: set upward velocity if grounded. Shared between client + server.
-/// Does its own inline ground check (shape cast + normal filter) to avoid
-/// relying on deferred commands that may not flush between rollback ticks.
-pub fn shared_jump(
-    trigger: On<Fire<JumpAction>>,
-    mut query: Query<(&mut CharacterVelocity, &Position, Has<Interpolated>, Has<PlayerDead>)>,
-    spatial_query: SpatialQuery,
+/// Reads the Look dual-axis (mouse motion) and applies it to yaw/pitch.
+/// Runs on both client (prediction) and server (authority); lightyear's
+/// ActionState replication means the server sees the same mouse deltas the
+/// client buffered.
+pub fn shared_look_system(
+    mut query: Query<
+        (&ActionState<PlayerActions>, &mut PlayerYaw, &mut PlayerPitch, Has<Interpolated>, Has<PlayerDead>),
+        With<PlayerId>,
+    >,
 ) {
-    let Ok((mut vel, position, is_interpolated, is_dead)) = query.get_mut(trigger.context) else {
-        return;
-    };
-    if is_interpolated || is_dead { return; }
-    if vel.0.y > 0.5 {
-        return;
-    }
-
-    let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
-    let config = ShapeCastConfig {
-        max_distance: 0.15,
-        target_distance: SKIN_WIDTH,
-        compute_contact_on_penetration: true,
-        ignore_origin_penetration: true,
-    };
-    let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
-
-    if let Some(hit) = spatial_query.cast_shape(
-        &capsule, position.0, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
-    ) {
-        if hit.normal1.y > MIN_GROUND_NORMAL_Y {
-            vel.0.y = JUMP_SPEED;
+    for (action, mut yaw, mut pitch, is_interpolated, is_dead) in query.iter_mut() {
+        if is_interpolated || is_dead {
+            continue;
         }
+
+        let delta = action.axis_pair(&PlayerActions::Look);
+        if delta == Vec2::ZERO {
+            continue;
+        }
+
+        yaw.0 += -delta.x * 0.003;
+        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+        pitch.0 = (pitch.0 + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 }
 
@@ -207,9 +245,9 @@ pub fn shared_jump(
 /// Flow: collect (p0) → shape cast (p1) → write back (p2).
 pub fn character_controller(
     mut params: ParamSet<(
-        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
+        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerId>, With<Collider>, Without<Interpolated>)>,
         SpatialQuery,
-        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerContext>, With<Collider>, Without<Interpolated>)>,
+        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerId>, With<Collider>, Without<Interpolated>)>,
     )>,
     time: Res<Time>,
 ) {
@@ -362,7 +400,7 @@ fn move_and_slide(
 
 /// Diagnostic: log player position/velocity every 2 seconds.
 pub fn log_player_state(
-    query: Query<(Entity, &Position, &CharacterVelocity), (With<PlayerContext>, With<Collider>)>,
+    query: Query<(Entity, &Position, &CharacterVelocity), (With<PlayerId>, With<Collider>)>,
     time: Res<Time>,
     mut timer: Local<f32>,
 ) {
@@ -381,33 +419,11 @@ pub fn log_player_state(
 
 // --- Shared Systems ---
 
-/// Shared observer: applies mouse look deltas to PlayerYaw/PlayerPitch.
-/// Runs on both client (prediction) and server (authority) via BEI input replication.
-/// This is how yaw/pitch reach the server — through the input system, not component replication.
-pub fn shared_look(
-    trigger: On<Fire<LookAction>>,
-    mut query: Query<(&mut PlayerYaw, &mut PlayerPitch, Has<Interpolated>, Has<PlayerDead>)>,
-) {
-    let delta = trigger.value;
-    if delta == Vec2::ZERO {
-        return;
-    }
-
-    let Ok((mut yaw, mut pitch, is_interpolated, is_dead)) = query.get_mut(trigger.context) else {
-        return;
-    };
-    if is_interpolated || is_dead { return; }
-
-    yaw.0 += -delta.x * 0.003;
-    const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-    pitch.0 = (pitch.0 + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-}
-
 /// Shared system: syncs PlayerYaw + PlayerPitch → Rotation so lightyear replicates
 /// both facing direction and pitch tilt. Runs in FixedUpdate on both client and server.
 /// Remote players display correct pitch tilt via the replicated Rotation.
 pub fn sync_rotation_from_yaw(
-    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), (With<PlayerContext>, Without<Interpolated>)>,
+    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), (With<PlayerId>, Without<Interpolated>)>,
 ) {
     for (yaw, pitch, mut rot) in query.iter_mut() {
         rot.0 = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);
@@ -416,45 +432,47 @@ pub fn sync_rotation_from_yaw(
 
 // --- Client-Only Systems ---
 
-/// Pre-rotate MoveAction's raw WASD Vec2 by camera yaw so the value sent to the
-/// server is already in world-space. Runs between BEI Update and BufferClientInputs.
+/// Client-only: rotates the Move axis from player-local (WASD) frame to world frame
+/// using the current PlayerYaw, BEFORE lightyear's BufferClientInputs captures the
+/// ActionState for replication. This way both the server and the prediction system
+/// see the same world-space movement vector — the server never has to rotate by yaw
+/// itself.
+///
+/// Runs in FixedPreUpdate in the `InputManagerSystem::ManualControl` set (i.e. after
+/// leafwing's Update set populated the raw WASD axis) and before
+/// `InputSystems::BufferClientInputs` (so the rotated value is what gets replicated).
 pub fn pre_rotate_move_input(
-    player_query: Query<&PlayerYaw, With<Controlled>>,
-    mut action_query: Query<
-        (&ActionOf<crate::protocol::PlayerContext>, &mut ActionValue),
-        With<Action<MoveAction>>,
-    >,
+    mut query: Query<(&PlayerYaw, &mut ActionState<PlayerActions>), With<Controlled>>,
 ) {
-    let Ok(player_yaw) = player_query.single() else {
+    let Ok((player_yaw, mut action)) = query.single_mut() else {
         return;
     };
-    let yaw = player_yaw.0;
-
-    for (_action_of, mut value) in action_query.iter_mut() {
-        if let ActionValue::Axis2D(v) = *value {
-            if v == Vec2::ZERO {
-                continue;
-            }
-            let forward = Vec2::new(-yaw.sin(), -yaw.cos());
-            let right = Vec2::new(yaw.cos(), -yaw.sin());
-            let rotated = forward * v.y + right * v.x;
-            *value = ActionValue::Axis2D(rotated);
-        }
+    let raw = action.axis_pair(&PlayerActions::Move);
+    if raw == Vec2::ZERO {
+        return;
     }
+    let yaw = player_yaw.0;
+    // WASD yields: x = strafe (+right), y = forward (+up on screen = +W).
+    // World forward at yaw=0 is -Z, world right at yaw=0 is +X.
+    let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+    let right = Vec2::new(yaw.cos(), -yaw.sin());
+    let rotated = forward * raw.y + right * raw.x;
+    action.set_axis_pair(&PlayerActions::Move, rotated);
 }
 
-/// Client-only: zeros LookAction when cursor is unlocked (e.g. Escape pressed).
+/// Client-only: zeros the Look axis when the cursor is unlocked (e.g. Escape pressed).
 /// Prevents mouse deltas from being sent to the server when the player isn't in control.
-/// Runs in FixedPreUpdate between BEI Update and BufferClientInputs.
+/// Runs in FixedPreUpdate in the `InputManagerSystem::ManualControl` set (after leafwing
+/// Update has populated the raw mouse motion) and before BufferClientInputs.
 pub fn gate_look_on_cursor(
     cursor_state: Res<CursorState>,
-    mut action_query: Query<&mut ActionValue, With<Action<crate::protocol::LookAction>>>,
+    mut query: Query<&mut ActionState<PlayerActions>, With<Controlled>>,
 ) {
     if cursor_state.locked {
         return;
     }
-    for mut value in action_query.iter_mut() {
-        *value = ActionValue::Axis2D(Vec2::ZERO);
+    for mut action in query.iter_mut() {
+        action.set_axis_pair(&PlayerActions::Look, Vec2::ZERO);
     }
 }
 

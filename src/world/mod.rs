@@ -1,14 +1,13 @@
 use avian3d::prelude::*;
 use bevy::camera::visibility::RenderLayers;
-use bevy::color::palettes::tailwind;
 use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
-use bevy_enhanced_input::prelude::*;
+use leafwing_input_manager::prelude::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::player::VIEW_MODEL_RENDER_LAYER;
-use crate::protocol::{DropAction, InteractAction, JabAction, PrimaryAction, PlayerEquipped, PlayerHealth, PlayerPitch, PlayerYaw};
+use crate::protocol::{PlayerActions, PlayerEquipped, PlayerHealth, PlayerId, PlayerPitch, PlayerYaw};
 
 #[derive(Debug, Component)]
 pub struct WorldModelCamera;
@@ -152,61 +151,62 @@ pub struct JabAnimation {
     pub start_time: f32,
 }
 
-/// Shared observer: jab melee attack — short range punch, server applies damage.
-pub fn shared_jab(
-    trigger: On<Fire<JabAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &crate::protocol::PlayerId, Has<Predicted>, Has<Interpolated>)>,
+/// Shared FixedUpdate system: jab melee attack — short range punch, server applies damage.
+/// Queries each player's ActionState and fires on `just_pressed(Jab)`. Leafwing's
+/// ActionState is restored cleanly during rollback, so this is safe to replay.
+pub fn shared_jab_system(
+    player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerId, Has<Predicted>, Has<Interpolated>)>,
     mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
     mut last_jab: Local<f32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
-        return;
-    };
-    if is_interpolated { return; }
+    for (shooter, action, player_pos, yaw, pitch, attacker_id, is_predicted, is_interpolated) in player_query.iter() {
+        if is_interpolated { continue; }
+        if !action.just_pressed(&PlayerActions::Jab) { continue; }
 
-    let current = time.elapsed_secs();
-    if current - *last_jab < JAB_COOLDOWN {
-        return;
-    }
-    *last_jab = current;
-
-    let eye_pos = player_pos.0 + Vec3::Y * 0.8;
-    let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
-    let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
-
-    info!(
-        "[JAB] Punch! pos={:?} dir={:?} predicted={}",
-        eye_pos, ray_dir, is_predicted
-    );
-
-    if let Some(hit) = spatial_query.cast_ray(
-        eye_pos,
-        Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
-        JAB_RANGE,
-        true,
-        &filter,
-    ) {
-        info!("[JAB] Hit entity {:?} at distance {:.1}", hit.entity, hit.distance);
-        if !is_predicted {
-            if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
-                health.0 -= JAB_DAMAGE;
-                if let Some(mut last) = last_damaged {
-                    last.0 = attacker_id.0;
-                }
-                info!("[JAB] {} damage applied, health now: {}", JAB_DAMAGE, health.0);
-            } else {
-                info!("[JAB] Hit entity {:?} but it has no PlayerHealth", hit.entity);
-            }
+        let current = time.elapsed_secs();
+        if current - *last_jab < JAB_COOLDOWN {
+            continue;
         }
-    } else {
-        info!("[JAB] Miss — no hit within range {}", JAB_RANGE);
-    }
+        *last_jab = current;
 
-    // Trigger animation event (client picks this up)
-    commands.trigger(JabFired);
+        let eye_pos = player_pos.0 + Vec3::Y * 0.8;
+        let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
+        let filter = SpatialQueryFilter::from_excluded_entities([shooter]);
+
+        info!(
+            "[JAB] Punch! pos={:?} dir={:?} predicted={}",
+            eye_pos, ray_dir, is_predicted
+        );
+
+        if let Some(hit) = spatial_query.cast_ray(
+            eye_pos,
+            Dir3::new(ray_dir).unwrap_or(Dir3::NEG_Z),
+            JAB_RANGE,
+            true,
+            &filter,
+        ) {
+            info!("[JAB] Hit entity {:?} at distance {:.1}", hit.entity, hit.distance);
+            if !is_predicted {
+                if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
+                    health.0 -= JAB_DAMAGE;
+                    if let Some(mut last) = last_damaged {
+                        last.0 = attacker_id.0;
+                    }
+                    info!("[JAB] {} damage applied, health now: {}", JAB_DAMAGE, health.0);
+                } else {
+                    info!("[JAB] Hit entity {:?} but it has no PlayerHealth", hit.entity);
+                }
+            }
+        } else {
+            info!("[JAB] Miss — no hit within range {}", JAB_RANGE);
+        }
+
+        // Trigger animation event (client picks this up)
+        commands.trigger(JabFired);
+    }
 }
 
 /// Event for client-side jab animation.
@@ -1788,98 +1788,97 @@ pub fn sync_remote_equipped(
 // Shared observers — run on both client + server via BEI input replay
 // ========================================
 
-/// Shared observer: opens door when player presses E within range.
-pub fn shared_door_interact(
-    trigger: On<Fire<InteractAction>>,
-    player_query: Query<(&Position, Has<Predicted>, Has<Interpolated>)>,
+/// Shared FixedUpdate system: opens door when player presses E within range.
+pub fn shared_door_interact_system(
+    player_query: Query<(&ActionState<PlayerActions>, &Position, Has<Predicted>, Has<Interpolated>), With<PlayerId>>,
     mut door_query: Query<(Entity, &Position, &mut DoorState)>,
     mut commands: Commands,
 ) {
-    let Ok((player_pos, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
-        return;
-    };
-    if is_interpolated { return; }
+    for (action, player_pos, is_predicted, is_interpolated) in player_query.iter() {
+        if is_interpolated { continue; }
+        if !action.just_pressed(&PlayerActions::Interact) { continue; }
 
-    for (entity, door_pos, mut door) in door_query.iter_mut() {
-        if door.open {
-            continue;
-        }
-        if player_pos.0.distance(door_pos.0) <= DOOR_INTERACT_DISTANCE {
-            door.open = true;
-            // Server: remove Collider so players can walk through.
-            // Client: sync_door_state handles rendering changes via Changed<DoorState>.
-            if !is_predicted {
-                commands.entity(entity).remove::<Collider>();
+        for (entity, door_pos, mut door) in door_query.iter_mut() {
+            if door.open {
+                continue;
             }
-            info!("Door opened!");
-            break;
+            if player_pos.0.distance(door_pos.0) <= DOOR_INTERACT_DISTANCE {
+                door.open = true;
+                // Server: remove Collider so players can walk through.
+                // Client: sync_door_state handles rendering changes via Changed<DoorState>.
+                if !is_predicted {
+                    commands.entity(entity).remove::<Collider>();
+                }
+                info!("Door opened!");
+                break;
+            }
         }
     }
 }
 
-/// Shared observer: equip items when player presses E within range.
-pub fn shared_equip_interact(
-    trigger: On<Fire<InteractAction>>,
-    mut player_query: Query<(&Position, &mut PlayerEquipped, Has<Interpolated>)>,
+/// Shared FixedUpdate system: equip items when player presses E within range.
+pub fn shared_equip_interact_system(
+    mut player_query: Query<(&ActionState<PlayerActions>, &Position, &mut PlayerEquipped, Has<Interpolated>), With<PlayerId>>,
     equippable_query: Query<(Entity, &Position, &Equippable), Without<PlayerEquipped>>,
 ) {
-    let Ok((player_pos, mut equipped, is_interpolated)) = player_query.get_mut(trigger.context) else {
-        return;
-    };
-    if is_interpolated { return; }
+    for (action, player_pos, mut equipped, is_interpolated) in player_query.iter_mut() {
+        if is_interpolated { continue; }
+        if !action.just_pressed(&PlayerActions::Interact) { continue; }
 
-    let mut closest: Option<(Entity, f32, String)> = None;
-    for (entity, eq_pos, equippable) in equippable_query.iter() {
-        let dist = player_pos.0.distance(eq_pos.0);
-        if dist <= equippable.interaction_distance {
-            if closest.as_ref().is_none_or(|(_, d, _)| dist < *d) {
-                closest = Some((entity, dist, equippable.name.clone()));
+        let mut closest: Option<(Entity, f32, String)> = None;
+        for (entity, eq_pos, equippable) in equippable_query.iter() {
+            let dist = player_pos.0.distance(eq_pos.0);
+            if dist <= equippable.interaction_distance {
+                if closest.as_ref().is_none_or(|(_, d, _)| dist < *d) {
+                    closest = Some((entity, dist, equippable.name.clone()));
+                }
+            }
+        }
+
+        if let Some((_, _, name)) = closest {
+            if equipped.0.as_ref() == Some(&name) {
+                continue;
+            }
+            info!("Equipped {}", name);
+            equipped.0 = Some(name);
+        }
+    }
+}
+
+/// Shared FixedUpdate system: drop equipped item when player presses G.
+pub fn shared_drop_system(
+    mut player_query: Query<(&ActionState<PlayerActions>, &Position, &mut PlayerEquipped, Has<Interpolated>), With<PlayerId>>,
+    mut equippable_query: Query<(Entity, &mut Position, &Equippable), Without<PlayerEquipped>>,
+) {
+    for (action, player_pos, mut equipped, is_interpolated) in player_query.iter_mut() {
+        if is_interpolated { continue; }
+        if !action.just_pressed(&PlayerActions::Drop) { continue; }
+
+        let Some(dropped_name) = equipped.0.take() else {
+            continue;
+        };
+        info!("Dropped {}", dropped_name);
+
+        for (_, mut eq_pos, equippable) in equippable_query.iter_mut() {
+            if equippable.name == dropped_name {
+                eq_pos.0 = player_pos.0 + Vec3::new(0.0, -0.5, 0.0);
+                break;
             }
         }
     }
-
-    if let Some((_, _, name)) = closest {
-        if equipped.0.as_ref() == Some(&name) {
-            return;
-        }
-        info!("Equipped {}", name);
-        equipped.0 = Some(name);
-    }
 }
 
-/// Shared observer: drop equipped item when player presses G.
-pub fn shared_drop(
-    trigger: On<Fire<DropAction>>,
-    mut player_query: Query<(&Position, &mut PlayerEquipped, Has<Interpolated>)>,
-    mut equippable_query: Query<(Entity, &mut Position, &Equippable), Without<PlayerEquipped>>,
-) {
-    let Ok((player_pos, mut equipped, is_interpolated)) = player_query.get_mut(trigger.context) else {
-        return;
-    };
-    if is_interpolated { return; }
-
-    let Some(dropped_name) = equipped.0.take() else {
-        return;
-    };
-    info!("Dropped {}", dropped_name);
-
-    for (_, mut eq_pos, equippable) in equippable_query.iter_mut() {
-        if equippable.name == dropped_name {
-            eq_pos.0 = player_pos.0 + Vec3::new(0.0, -0.5, 0.0);
-            break;
-        }
-    }
-}
-
-/// Shared observer: primary action — routes to mine or shoot based on equipped item.
+/// Shared FixedUpdate system: primary action — routes to mine or shoot based on equipped item.
 /// Rollback-safe: stores `mine_start_secs` (absolute time) and computes progress
 /// as `current_time - start_time`. Idempotent — replaying the same tick
 /// during rollback produces the same result without double-counting.
 ///
 /// Only the server handles despawn + ore chunk spawn (replicates to all clients).
-pub fn shared_primary_action(
-    trigger: On<Fire<PrimaryAction>>,
-    player_query: Query<(&Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, &crate::protocol::PlayerId, Has<Predicted>, Has<Interpolated>)>,
+///
+/// For guns we fire on `just_pressed` so a single click fires once per press.
+/// For mining we check `pressed` so the tool works as long as the button is held.
+pub fn shared_primary_action_system(
+    player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerEquipped, &PlayerId, Has<Predicted>, Has<Interpolated>)>,
     mut interactables_query: Query<(Entity, &Position, &mut Interactable)>,
     health_query: Query<(Entity, &PlayerHealth, &Position)>,
     equippable_query: Query<&Equippable>,
@@ -1889,25 +1888,33 @@ pub fn shared_primary_action(
     mut shot_counter: Local<u32>,
     time: Res<Time>,
 ) {
-    let Ok((player_pos, yaw, pitch, equipped, _attacker_id, is_predicted, is_interpolated)) = player_query.get(trigger.context) else {
-        return;
-    };
-    if is_interpolated { return; }
+    for (shooter, action, player_pos, yaw, pitch, equipped, _attacker_id, is_predicted, is_interpolated) in player_query.iter() {
+        if is_interpolated { continue; }
 
-    let tool_name = equipped.0.as_deref();
+        let tool_name = equipped.0.as_deref();
+
+        // Gate the rest of the handler on whether Primary is active this tick.
+        // Guns use just_pressed (one shot per click); mining uses pressed (held).
+        let is_gun = matches!(tool_name, Some(n) if n.contains("AK") || n.contains("ak") || n.contains("gun"));
+        let fire = if is_gun {
+            action.just_pressed(&PlayerActions::Primary)
+        } else {
+            action.pressed(&PlayerActions::Primary)
+        };
+        if !fire { continue; }
 
     match tool_name {
         // Gun equipped → hitscan shoot
         Some(name) if name.contains("AK") || name.contains("ak") || name.contains("gun") => {
             let current = time.elapsed_secs();
             if current - *last_shot < SHOOT_COOLDOWN {
-                return;
+                continue;
             }
             *last_shot = current;
 
             let eye_pos = player_pos.0 + Vec3::Y * 0.8;
             let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
-            let filter = SpatialQueryFilter::from_excluded_entities([trigger.context]);
+            let filter = SpatialQueryFilter::from_excluded_entities([shooter]);
 
             info!(
                 "[SHOOT] Fire! pos={:?} yaw={:.2} pitch={:.2} dir={:?} predicted={}",
@@ -1964,7 +1971,7 @@ pub fn shared_primary_action(
 
             // Set LastShot on the player entity so remote clients can see the tracer
             *shot_counter += 1;
-            commands.entity(trigger.context).insert(crate::protocol::LastShot {
+            commands.entity(shooter).insert(crate::protocol::LastShot {
                 muzzle: muzzle_world,
                 hit_point,
                 tick: *shot_counter,
@@ -1990,8 +1997,8 @@ pub fn shared_primary_action(
                 }
             }
 
-            let Some(target) = closest else { return; };
-            let Ok((_, pos, mut interactable)) = interactables_query.get_mut(target) else { return; };
+            let Some(target) = closest else { continue; };
+            let Ok((_, pos, mut interactable)) = interactables_query.get_mut(target) else { continue; };
 
             if let Some(last) = interactable.last_mine_secs {
                 if current_secs - last > 0.05 {
@@ -2034,6 +2041,7 @@ pub fn shared_primary_action(
         // Nothing equipped → no action
         None => {}
     }
+    } // for loop
 }
 
 pub const SHOOT_DAMAGE: i32 = 25;

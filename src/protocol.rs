@@ -1,12 +1,10 @@
 use std::time::Duration;
 
 use avian3d::prelude::*;
-use bevy::math::VectorSpace;
 use bevy::prelude::*;
-use bevy_enhanced_input::prelude::*;
-use lightyear::prelude::input::bei::InputPlugin;
-use lightyear::prelude::input::InputConfig;
-use lightyear::prelude::input::InputRegistryExt;
+use leafwing_input_manager::prelude::*;
+use lightyear::input::prelude::InputConfig;
+use lightyear::prelude::input::leafwing;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -61,51 +59,40 @@ pub struct PlayerPitch(pub f32);
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct CharacterVelocity(pub Vec3);
 
-// --- BEI Input Context ---
+// --- Input Actions (leafwing) ---
+//
+// Single enum replaces the per-struct BEI actions. `ActionState<PlayerActions>`
+// is queried each FixedUpdate tick — leafwing+lightyear snapshot/restore it
+// cleanly across rollback, which BEI's Fire<Action> observers could not.
 
-/// Marker component identifying a player input context for BEI + lightyear.
-/// Named PlayerContext to avoid collision with player::Player.
-#[derive(Component, Serialize, Deserialize, Reflect, Clone, Debug, PartialEq)]
-pub struct PlayerContext;
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash, Reflect)]
+pub enum PlayerActions {
+    /// WASD (client) → Vec2. The client pre-rotates this by camera yaw BEFORE
+    /// lightyear's BufferClientInputs captures it, so the value replicated to
+    /// the server is already in world-space.
+    Move,
+    /// Mouse motion → Vec2 (x = yaw delta, y = pitch delta).
+    Look,
+    /// Space → jump
+    Jump,
+    /// E → interact (open door / pick up equippable)
+    Interact,
+    /// G → drop equipped item
+    Drop,
+    /// Q → left-hand jab (melee)
+    Jab,
+    /// Left mouse → primary action (shoot / mine depending on equipped item)
+    Primary,
+}
 
-// --- Input Actions ---
-
-/// WASD movement → Vec2 (x = right/left, y = forward/back)
-#[derive(Debug, InputAction)]
-#[action_output(Vec2)]
-pub struct MoveAction;
-
-/// Space → jump (bool, fires while held)
-#[derive(Debug, InputAction)]
-#[action_output(bool)]
-pub struct JumpAction;
-
-/// E → interact (bool, fires while held)
-#[derive(Debug, InputAction)]
-#[action_output(bool)]
-pub struct InteractAction;
-
-/// G → drop equipped item
-#[derive(Debug, InputAction)]
-#[action_output(bool)]
-pub struct DropAction;
-
-/// Q → left hand jab (melee)
-#[derive(Debug, InputAction)]
-#[action_output(bool)]
-pub struct JabAction;
-
-/// Left click → primary action (mine, shoot, etc. depending on equipped item)
-#[derive(Debug, InputAction)]
-#[action_output(bool)]
-pub struct PrimaryAction;
-
-/// Mouse motion → look delta (Vec2: x = yaw delta, y = pitch delta).
-/// Replicated to server via lightyear's BEI input system so the server
-/// knows the player's facing direction for hit detection.
-#[derive(Debug, InputAction)]
-#[action_output(Vec2)]
-pub struct LookAction;
+impl Actionlike for PlayerActions {
+    fn input_control_kind(&self) -> InputControlKind {
+        match self {
+            Self::Move | Self::Look => InputControlKind::DualAxis,
+            _ => InputControlKind::Button,
+        }
+    }
+}
 
 /// Tracks which tool a player has equipped. Replicated so the server
 /// can validate mining and other players can see held items.
@@ -195,9 +182,12 @@ pub struct ProtocolPlugin;
 
 impl Plugin for ProtocolPlugin {
     fn build(&self, app: &mut App) {
-        // BEI input replication
-        app.add_plugins(InputPlugin::<PlayerContext> {
-            config: InputConfig::<PlayerContext> {
+        // Leafwing input replication via lightyear. ActionState<PlayerActions>
+        // is captured each tick on the client, buffered + sent to the server,
+        // and restored during rollback — which BEI's Fire<Action> observers
+        // could not do cleanly.
+        app.add_plugins(leafwing::InputPlugin::<PlayerActions> {
+            config: InputConfig::<PlayerActions> {
                 rebroadcast_inputs: true,
                 // Include the client's InterpolationDelay in input messages
                 // so the server can rewind to where the client saw targets when shooting
@@ -205,13 +195,6 @@ impl Plugin for ProtocolPlugin {
                 ..default()
             },
         });
-        app.register_input_action::<MoveAction>();
-        app.register_input_action::<JumpAction>();
-        app.register_input_action::<InteractAction>();
-        app.register_input_action::<DropAction>();
-        app.register_input_action::<JabAction>();
-        app.register_input_action::<PrimaryAction>();
-        app.register_input_action::<LookAction>();
 
         // Replicated components
         app.register_component::<PlayerId>();
@@ -304,4 +287,3 @@ fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
 fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
     (this.0 - that.0).length() >= 5.0 // 5 m/s — only correct major desync
 }
-
