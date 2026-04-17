@@ -288,17 +288,20 @@ impl Plugin for ProtocolPlugin {
 // Prevent unnecessary rollbacks from floating-point noise.
 // Only rollback if the server/client values differ by more than a small threshold.
 
-// Generous thresholds prevent rollback thrashing from floating-point drift.
-// Lightyear's correction smoothing handles the visual reconciliation.
+// Very generous thresholds to prevent rollback thrashing from cross-platform
+// float non-determinism (client on macOS ARM, server on Linux x86).
+// When rollback does fire, enable_correction() smooths the visual transition.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 0.15 // 15cm — ignores jump physics drift
+    (this.0 - that.0).length() >= 0.5 // 50cm — only correct genuine desync
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
-    this.angle_between(*that) >= 0.05 // ~3° — ignores float drift
+    this.angle_between(*that) >= 0.1 // ~5.7° — ignores float drift
 }
 
+// Velocity rarely needs rollback — if position is right, velocity converges.
+// Only rollback on major mismatches (jump denied, etc).
 fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
-    (this.0 - that.0).length() >= 0.5 // 0.5 m/s — ignores gravity integration drift
+    (this.0 - that.0).length() >= 5.0 // 5 m/s — only correct major desync
 }
 
