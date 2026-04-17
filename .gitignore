@@ -1,1 +1,7 @@
 /target
+
+# Reference assets — kept in workspace for browsing, not committed
+/assets/_reference/
+
+# macOS metadata
+.DS_Store
