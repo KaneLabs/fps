@@ -7,8 +7,9 @@ use bevy::light::NotShadowCaster;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiContexts, egui};
-use bevy_enhanced_input::prelude::*;
 use bevy_kira_audio::prelude::*;
+use leafwing_input_manager::prelude::*;
+use leafwing_input_manager::plugin::InputManagerSystem;
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
 
@@ -78,10 +79,7 @@ fn main() {
     info!("Client identity: {} (id={})", identity.address, identity.client_id);
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(bevy::log::LogPlugin {
-        filter: "bevy_enhanced_input::action::fns=error".into(),
-        ..default()
-    }).set(WindowPlugin {
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
             ..default()
@@ -138,10 +136,16 @@ fn main() {
             .run_if(in_state(AppState::InGame))
             .run_if(not(lightyear::prelude::is_in_rollback)),
     );
+    // Leafwing populates `ActionState<PlayerActions>` in `InputManagerSystem::Update`.
+    // We mutate it (rotate Move by yaw, zero Look when cursor unlocked) in
+    // `InputManagerSystem::ManualControl`, which is guaranteed to run after Update.
+    // Then `InputSystems::BufferClientInputs` snapshots the ActionState into the
+    // input buffer and replicates it to the server — so the server sees the final
+    // world-space Move axis directly.
     app.add_systems(
         FixedPreUpdate,
         (pre_rotate_move_input, gate_look_on_cursor)
-            .after(EnhancedInputSystems::Update)
+            .in_set(InputManagerSystem::ManualControl)
             .before(lightyear::prelude::client::input::InputSystems::BufferClientInputs)
             .run_if(not(lightyear::prelude::is_in_rollback))
             .run_if(in_state(AppState::InGame)),
@@ -1193,41 +1197,18 @@ fn on_predicted_spawn(
         ));
     });
 
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<MoveAction>::new(),
-        Bindings::spawn(Cardinal::wasd_keys()),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<JumpAction>::new(),
-        Bindings::spawn(Spawn(Binding::from(KeyCode::Space))),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<InteractAction>::new(),
-        Bindings::spawn(Spawn(Binding::from(KeyCode::KeyE))),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<DropAction>::new(),
-        Bindings::spawn(Spawn(Binding::from(KeyCode::KeyG))),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<JabAction>::new(),
-        Bindings::spawn(Spawn(Binding::from(KeyCode::KeyQ))),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<PrimaryAction>::new(),
-        Bindings::spawn(Spawn(Binding::from(MouseButton::Left))),
-    ));
-    commands.spawn((
-        ActionOf::<PlayerContext>::new(entity),
-        Action::<LookAction>::new(),
-        Bindings::spawn(Spawn(Binding::mouse_motion())),
-    ));
+    // Single InputMap component on the controlled player entity — leafwing reads
+    // this each tick to populate `ActionState<PlayerActions>` (which the server
+    // then receives via lightyear's leafwing input plugin).
+    let mut input_map = InputMap::default();
+    input_map.insert_dual_axis(PlayerActions::Move, VirtualDPad::wasd());
+    input_map.insert_dual_axis(PlayerActions::Look, MouseMove::default());
+    input_map.insert(PlayerActions::Jump, KeyCode::Space);
+    input_map.insert(PlayerActions::Interact, KeyCode::KeyE);
+    input_map.insert(PlayerActions::Drop, KeyCode::KeyG);
+    input_map.insert(PlayerActions::Jab, KeyCode::KeyQ);
+    input_map.insert(PlayerActions::Primary, MouseButton::Left);
+    commands.entity(entity).insert(input_map);
 }
 
 /// Remote player: interpolated entity — smooth, slightly delayed, no rubberbanding.
