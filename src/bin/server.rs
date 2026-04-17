@@ -84,7 +84,7 @@ fn main() {
 
     // Death and respawn
     app.init_resource::<PendingRespawns>();
-    app.add_systems(FixedUpdate, (check_player_death, process_respawns));
+    app.add_systems(FixedUpdate, (kill_plane, check_player_death, process_respawns).chain());
 
     // Wallet auth: process incoming auth messages from clients
     app.add_systems(Update, process_wallet_auth);
@@ -108,7 +108,8 @@ fn spawn_server(mut commands: Commands) {
             NetcodeServer::new(NetcodeConfig {
                 protocol_id: PROTOCOL_ID,
                 private_key: [0; 32],
-                client_timeout_secs: 120,
+                // Short timeout — stale client IDs clear quickly so reconnects work
+                client_timeout_secs: 10,
                 ..Default::default()
             }),
             LocalAddr(server_addr),
@@ -318,6 +319,21 @@ fn server_shoot_with_lag_comp(
 struct PendingRespawns {
     /// Maps player entity -> time when respawn is allowed.
     timers: Vec<(Entity, f32)>,
+}
+
+/// Server-only: kill plane — any player below this Y is instantly killed.
+/// Prevents players from falling forever if they clip through geometry.
+const KILL_PLANE_Y: f32 = -60.0;
+
+fn kill_plane(
+    mut query: Query<(&Position, &mut PlayerHealth, &PlayerId), Without<PlayerDead>>,
+) {
+    for (pos, mut health, id) in query.iter_mut() {
+        if pos.0.y < KILL_PLANE_Y && health.0 > 0 {
+            info!("[KILL-PLANE] Player {} fell below y={} (pos={:?})", id.0, KILL_PLANE_Y, pos.0);
+            health.0 = 0;
+        }
+    }
 }
 
 /// Server-only: when health drops to 0, mark the player as dead and drop all items.

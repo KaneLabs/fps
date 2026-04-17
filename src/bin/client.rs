@@ -746,7 +746,7 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
     info!("Connecting as {} (id={})", identity.address, identity.client_id);
 
     let netcode_config = NetcodeConfig {
-        client_timeout_secs: 120,
+        client_timeout_secs: 10,
         token_expire_secs: 120,
         ..default()
     };
