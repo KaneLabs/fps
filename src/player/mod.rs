@@ -1,6 +1,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use avian3d::prelude::*;
+use avian3d::prelude::forces::ForcesItem;
 use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
@@ -11,15 +12,22 @@ use avian3d::prelude::Rotation;
 use lightyear::prelude::{Controlled, Interpolated};
 
 use crate::protocol::{
-    CharacterVelocity, PlayerActions, PlayerDead, PlayerEquipped, PlayerHealth, PlayerId,
-    PlayerPitch, PlayerYaw,
+    PlayerActions, PlayerDead, PlayerEquipped, PlayerHealth, PlayerId, PlayerPitch, PlayerYaw,
 };
 
-pub const PLAYER_MOVE_SPEED: f32 = 7.0;
-pub const JUMP_SPEED: f32 = 10.0;
-pub const GRAVITY: f32 = 32.0;
-pub const SKIN_WIDTH: f32 = 0.02;
-pub const STEP_HEIGHT: f32 = 0.1;
+// --- Movement feel tunables ---
+//
+// With avian's dynamic rigid body pattern, motion is produced by applying
+// forces (horizontal) and impulses (vertical). These constants tune the feel.
+/// Horizontal ground speed cap (m/s).
+pub const MAX_SPEED: f32 = 7.0;
+/// Max horizontal acceleration (m/s²). Controls how snappy start/stop/strafe feels.
+pub const MAX_ACCELERATION: f32 = 50.0;
+/// Vertical impulse applied on jump (m/s ⋅ kg — effective jump height scales
+/// with inverse mass). With avian's default mass and Gravity(-9.81), ~5.4 lifts
+/// us ~1.5 m.
+pub const JUMP_IMPULSE: f32 = 5.4;
+
 pub const VIEW_MODEL_RENDER_LAYER: usize = 1;
 pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 1.5, 5.0);
 
@@ -57,12 +65,10 @@ pub fn select_spawn_point(living_positions: &[Vec3]) -> Vec3 {
         .unwrap_or(PLAYER_SPAWN_POS)
 }
 
-/// Capsule dimensions (must match Collider in physics bundle)
-const CAPSULE_RADIUS: f32 = 0.5;
-const CAPSULE_HEIGHT: f32 = 1.0;
-
-/// Surface normal must have Y > this to count as walkable ground (~45° max slope)
-const MIN_GROUND_NORMAL_Y: f32 = 0.7;
+/// Capsule dimensions (must match Collider in physics bundle).
+/// These are the half-extents avian uses: total height ≈ 2*radius + height = ~2m.
+pub const CAPSULE_RADIUS: f32 = 0.5;
+pub const CAPSULE_HEIGHT: f32 = 1.0;
 
 // --- Shared Components (used by both server + client) ---
 
@@ -98,13 +104,48 @@ impl Default for CursorState {
 // These ensure server and client have identical physics/gameplay components.
 // Define once here, use in both server.rs and client.rs.
 
-/// Physics components for a player entity. Kinematic — we control Position directly
-/// via the character controller. Avian detects collisions but doesn't move us.
-pub fn player_physics_bundle() -> impl Bundle {
+/// Physics for locally-simulated player entities — the server's authoritative
+/// player and the client's predicted (controlled) player.
+///
+/// Dynamic rigid body driven by avian's integrator. Forces applied via
+/// `ForcesItem` give deterministic motion under lightyear's rollback — unlike
+/// our old kinematic character controller, whose SpatialQuery-driven writes
+/// produced different results when replayed because it sampled the *current*
+/// collider positions rather than the replay-tick positions.
+///
+/// Rotations are locked on all axes so the capsule never tips over; our
+/// `sync_rotation_from_yaw` system writes `Rotation` each tick based on the
+/// replicated yaw/pitch so the facing direction is still deterministic.
+/// Zero friction with Min combine prevents sticky contacts that would cause
+/// rubber-banding on sloped geometry.
+pub fn player_physics_bundle_dynamic() -> impl Bundle {
+    (
+        Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT),
+        RigidBody::Dynamic,
+        LockedAxes::default()
+            .lock_rotation_x()
+            .lock_rotation_y()
+            .lock_rotation_z(),
+        Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
+    )
+}
+
+/// Physics for the client's view of remote, interpolated players. Kinematic so
+/// avian doesn't try to simulate gravity/forces locally — lightyear drives
+/// Position/Rotation from interpolated snapshots instead. Collider is still
+/// present so local ray-casts (tracers, prediction-only visuals) hit them.
+pub fn player_physics_bundle_kinematic() -> impl Bundle {
     (
         Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT),
         RigidBody::Kinematic,
     )
+}
+
+/// Back-compat alias used by a couple of sites that don't care which variant
+/// — just need a collider + rigid body. Defaults to the kinematic flavour so
+/// passive use doesn't accidentally spawn a dynamic body that falls forever.
+pub fn player_physics_bundle() -> impl Bundle {
+    player_physics_bundle_kinematic()
 }
 
 /// Replicated gameplay state for a player entity.
@@ -113,6 +154,11 @@ pub fn player_physics_bundle() -> impl Bundle {
 /// `ActionState<PlayerActions>` is the leafwing equivalent of the old BEI
 /// `PlayerContext` marker — it's the replicated input component queried each
 /// FixedUpdate by shared movement/shoot/etc systems on both ends.
+///
+/// Note: `LinearVelocity` / `AngularVelocity` / `ComputedMass` are added
+/// automatically by avian as required components of `RigidBody`, so we don't
+/// include them here. They are still registered for replication in
+/// `ProtocolPlugin` so predicted clients see the server's velocity state.
 pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
     (
         ActionState::<PlayerActions>::default(),
@@ -124,83 +170,103 @@ pub fn player_replicated_bundle(client_id: u64) -> impl Bundle {
         PlayerHealth::default(),
         crate::protocol::LastDamagedBy::default(),
         crate::protocol::LastShot::default(),
-        CharacterVelocity::default(),
         Position(PLAYER_SPAWN_POS),
         Rotation::default(),
     )
 }
 
-// --- Shared Movement (FixedUpdate, runs on both client + server) ---
+// --- Shared Character Action Application (FixedUpdate, runs on both client + server) ---
 
-/// Reads the Move dual-axis from each player's ActionState and applies it to their
-/// CharacterVelocity. Input is already world-space (pre-rotated by camera yaw on
-/// the client before lightyear buffers the ActionState for replication).
+/// Apply the character action for a single entity. Mirrors the
+/// `lightyear/examples/avian_3d_character` pattern:
 ///
-/// Runs every FixedUpdate on both client (prediction) and server (authority).
-/// Leafwing's ActionState is snapshot/restored cleanly across rollback — so this
-/// system can be called during replay without the rubber-banding that plagued BEI.
-pub fn shared_movement_system(
-    mut query: Query<
-        (&ActionState<PlayerActions>, &mut CharacterVelocity, Has<Interpolated>, Has<PlayerDead>),
-        With<PlayerId>,
-    >,
+/// - Jump: on `just_pressed(Jump)`, raycast down from the capsule bottom; if
+///   we're grounded, apply an instantaneous linear impulse upwards.
+/// - Move: compute a target ground velocity from the pre-rotated Move axis,
+///   then apply the force required to reach that target this tick, bounded by
+///   `MAX_ACCELERATION`.
+///
+/// This is deterministic under rollback because forces are applied to an
+/// avian rigid body — avian's integrator consumes the same forces each replay
+/// and produces the same position delta. The old kinematic controller's
+/// SpatialQuery-driven writes weren't rollback-safe because SpatialQuery reads
+/// the *current* collider positions, not the replay-tick positions.
+pub fn apply_character_action(
+    entity: Entity,
+    mass: &ComputedMass,
+    time: &Res<Time>,
+    spatial_query: &SpatialQuery,
+    action_state: &ActionState<PlayerActions>,
+    mut forces: ForcesItem,
 ) {
-    for (action, mut vel, is_interpolated, is_dead) in query.iter_mut() {
-        if is_interpolated || is_dead {
-            continue;
+    // How much horizontal velocity can change in a single tick.
+    let max_velocity_delta_per_tick = MAX_ACCELERATION * time.delta_secs();
+
+    // --- Jump ---
+    if action_state.just_pressed(&PlayerActions::Jump) {
+        // Raycast down from the bottom of the capsule; only jump if we hit
+        // something right below us.
+        let foot = forces.position().0
+            + Vec3::new(0.0, -CAPSULE_HEIGHT / 2.0 - CAPSULE_RADIUS, 0.0);
+        let grounded = spatial_query
+            .cast_ray(
+                foot,
+                Dir3::NEG_Y,
+                0.01,
+                true,
+                &SpatialQueryFilter::from_excluded_entities([entity]),
+            )
+            .is_some();
+        if grounded {
+            forces.apply_linear_impulse(Vec3::new(0.0, JUMP_IMPULSE, 0.0));
         }
-
-        let input = action.axis_pair(&PlayerActions::Move);
-
-        if input == Vec2::ZERO {
-            vel.0.x = 0.0;
-            vel.0.z = 0.0;
-            continue;
-        }
-
-        let move_dir = input.normalize_or_zero();
-        vel.0.x = move_dir.x * PLAYER_MOVE_SPEED;
-        vel.0.z = move_dir.y * PLAYER_MOVE_SPEED;
     }
+
+    // --- Move ---
+    // The Move axis is already in world space (the client pre-rotates by
+    // camera yaw before lightyear buffers ActionState). Convention matches the
+    // old pre_rotate: +x = world X (right), +y = world -Z (forward) — pressing
+    // W at yaw=0 gives axis (0, -1) which maps to world (0, 0, -1).
+    let raw = action_state
+        .axis_pair(&PlayerActions::Move)
+        .clamp_length_max(1.0);
+    let move_dir = Vec3::new(raw.x, 0.0, raw.y);
+
+    let linear_velocity = forces.linear_velocity();
+    let ground_linear_velocity = Vec3::new(linear_velocity.x, 0.0, linear_velocity.z);
+
+    let desired_ground_linear_velocity = move_dir * MAX_SPEED;
+
+    let new_ground_linear_velocity = ground_linear_velocity
+        .move_towards(desired_ground_linear_velocity, max_velocity_delta_per_tick);
+
+    // Acceleration needed to hit the target this tick. `move_towards` already
+    // bounds the delta by `max_velocity_delta_per_tick`, so the magnitude is
+    // guaranteed ≤ MAX_ACCELERATION.
+    let required_acceleration =
+        (new_ground_linear_velocity - ground_linear_velocity) / time.delta_secs();
+
+    forces.apply_force(required_acceleration * mass.value());
 }
 
-/// Jump: set upward velocity if grounded. Shared between client + server.
-/// Triggered by just_pressed(Jump) so a single keypress fires one jump even
-/// though the key may be held across multiple ticks.
-pub fn shared_jump_system(
+/// FixedUpdate system: walks every player with an ActionState + Forces and
+/// delegates to `apply_character_action`. Runs on both the client (for the
+/// locally-predicted controlled entity) and the server (for all players).
+///
+/// Skips interpolated / dead players.
+pub fn handle_character_actions(
+    time: Res<Time>,
+    spatial_query: SpatialQuery,
     mut query: Query<
-        (Entity, &ActionState<PlayerActions>, &mut CharacterVelocity, &Position, Has<Interpolated>, Has<PlayerDead>),
+        (Entity, &ComputedMass, &ActionState<PlayerActions>, Forces, Has<Interpolated>, Has<PlayerDead>),
         With<PlayerId>,
     >,
-    spatial_query: SpatialQuery,
 ) {
-    for (entity, action, mut vel, position, is_interpolated, is_dead) in query.iter_mut() {
+    for (entity, mass, action_state, forces, is_interpolated, is_dead) in query.iter_mut() {
         if is_interpolated || is_dead {
             continue;
         }
-        if !action.just_pressed(&PlayerActions::Jump) {
-            continue;
-        }
-        if vel.0.y > 0.5 {
-            continue;
-        }
-
-        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
-        let config = ShapeCastConfig {
-            max_distance: 0.15,
-            target_distance: SKIN_WIDTH,
-            compute_contact_on_penetration: true,
-            ignore_origin_penetration: true,
-        };
-        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
-
-        if let Some(hit) = spatial_query.cast_shape(
-            &capsule, position.0, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
-        ) {
-            if hit.normal1.y > MIN_GROUND_NORMAL_Y {
-                vel.0.y = JUMP_SPEED;
-            }
-        }
+        apply_character_action(entity, mass, &time, &spatial_query, action_state, forces);
     }
 }
 
@@ -230,177 +296,9 @@ pub fn shared_look_system(
     }
 }
 
-// --- Kinematic Character Controller ---
-
-/// Kinematic character controller. Runs every fixed tick on both client + server.
-/// Handles gravity, ground detection via shape cast, and move-and-slide collision.
-///
-/// Uses ParamSet because SpatialQuery reads Position internally (for all colliders),
-/// and we also need to write Position for players. We collect→compute→writeback.
-/// Kinematic character controller. Runs every fixed tick on both client + server.
-/// Handles gravity, ground detection via shape cast, and move-and-slide collision.
-///
-/// All Position-accessing params must live inside the ParamSet because SpatialQuery
-/// reads Position for all colliders, and we need to write Position for players.
-/// Flow: collect (p0) → shape cast (p1) → write back (p2).
-pub fn character_controller(
-    mut params: ParamSet<(
-        Query<(Entity, &Position, &CharacterVelocity), (With<PlayerId>, With<Collider>, Without<Interpolated>)>,
-        SpatialQuery,
-        Query<(&mut Position, &mut CharacterVelocity), (With<PlayerId>, With<Collider>, Without<Interpolated>)>,
-    )>,
-    time: Res<Time>,
-) {
-    let dt = time.delta_secs();
-    let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
-    // Shorter capsule for horizontal casts — bottom raised by STEP_HEIGHT
-    // to prevent scraping the ground and gives basic stair-stepping
-    let h_capsule = Collider::capsule(CAPSULE_RADIUS, (CAPSULE_HEIGHT - STEP_HEIGHT * 2.0).max(0.0));
-
-    // 1. Collect current state
-    let players: Vec<(Entity, Vec3, Vec3)> = params
-        .p0()
-        .iter()
-        .map(|(e, p, v)| (e, p.0, v.0))
-        .collect();
-
-    // 2. Compute new positions using SpatialQuery
-    let spatial = params.p1();
-    let mut results: Vec<(Entity, Vec3, Vec3)> = Vec::with_capacity(players.len());
-
-    for (entity, mut pos, mut vel) in players {
-        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
-
-        // Apply gravity
-        vel.y -= GRAVITY * dt;
-
-        // --- Horizontal move-and-slide ---
-        let h_vel = Vec3::new(vel.x, 0.0, vel.z);
-        if h_vel.length_squared() > 0.0001 {
-            let h_delta = h_vel * dt;
-            pos += move_and_slide(&spatial, &h_capsule, pos, h_delta, &filter);
-        }
-
-        // --- Vertical movement + ground detection ---
-        if vel.y <= 0.0 {
-            let fall_dist = vel.y.abs() * dt + 0.1;
-            let config = ShapeCastConfig {
-                max_distance: fall_dist,
-                target_distance: SKIN_WIDTH,
-                compute_contact_on_penetration: true,
-                ignore_origin_penetration: true,
-            };
-
-            match spatial.cast_shape(
-                &capsule, pos, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
-            ) {
-                Some(hit) if hit.normal1.y > MIN_GROUND_NORMAL_Y => {
-                    // Hit walkable ground — snap and zero vertical velocity
-                    if hit.distance > 0.0 {
-                        pos.y -= hit.distance;
-                    }
-                    vel.y = 0.0;
-                }
-                _ => {
-                    // Airborne or hit a wall/steep slope — keep falling
-                    pos.y += vel.y * dt;
-                }
-            }
-        } else {
-            // Moving upward (jumping) — cast for ceiling
-            let up_dist = vel.y * dt;
-            let config = ShapeCastConfig {
-                max_distance: up_dist,
-                target_distance: SKIN_WIDTH,
-                compute_contact_on_penetration: true,
-                ignore_origin_penetration: true,
-            };
-
-            match spatial.cast_shape(
-                &capsule, pos, Quat::IDENTITY, Dir3::Y, &config, &filter,
-            ) {
-                Some(hit) => {
-                    if hit.distance > 0.0 {
-                        pos.y += hit.distance;
-                    }
-                    vel.y = 0.0;
-                }
-                None => {
-                    pos.y += up_dist;
-                }
-            }
-        }
-
-        results.push((entity, pos, vel));
-    }
-
-    // 3. Write back results
-    drop(spatial);
-    let mut writeback = params.p2();
-    for (entity, new_pos, new_vel) in results {
-        if let Ok((mut pos, mut vel)) = writeback.get_mut(entity) {
-            pos.0 = new_pos;
-            vel.0 = new_vel;
-        }
-    }
-}
-
-/// Cast the player capsule in `delta` direction. On collision, slide along the surface.
-/// Returns the actual displacement to apply. Max 2 iterations (move + slide).
-fn move_and_slide(
-    spatial_query: &SpatialQuery,
-    shape: &Collider,
-    mut origin: Vec3,
-    mut remaining: Vec3,
-    filter: &SpatialQueryFilter,
-) -> Vec3 {
-    let mut total = Vec3::ZERO;
-
-    for _ in 0..2 {
-        let dist = remaining.length();
-        if dist < 0.0001 {
-            break;
-        }
-
-        let Ok(dir) = Dir3::new(remaining / dist) else {
-            break;
-        };
-
-        let config = ShapeCastConfig {
-            max_distance: dist,
-            target_distance: SKIN_WIDTH,
-            compute_contact_on_penetration: true,
-            ignore_origin_penetration: true,
-        };
-
-        match spatial_query.cast_shape(shape, origin, Quat::IDENTITY, dir, &config, filter) {
-            Some(hit) => {
-                // Move up to the surface (distance already accounts for skin via target_distance)
-                let step = dir.as_vec3() * hit.distance;
-                total += step;
-                origin += step;
-
-                // Project remaining movement onto the surface to slide
-                let leftover = dist - hit.distance;
-                if leftover < 0.001 {
-                    break;
-                }
-                let slide_vec = remaining.normalize() * leftover;
-                remaining = slide_vec - hit.normal1 * slide_vec.dot(hit.normal1);
-            }
-            None => {
-                total += remaining;
-                break;
-            }
-        }
-    }
-
-    total
-}
-
 /// Diagnostic: log player position/velocity every 2 seconds.
 pub fn log_player_state(
-    query: Query<(Entity, &Position, &CharacterVelocity), (With<PlayerId>, With<Collider>)>,
+    query: Query<(Entity, &Position, &LinearVelocity), (With<PlayerId>, With<Collider>)>,
     time: Res<Time>,
     mut timer: Local<f32>,
 ) {
@@ -422,6 +320,10 @@ pub fn log_player_state(
 /// Shared system: syncs PlayerYaw + PlayerPitch → Rotation so lightyear replicates
 /// both facing direction and pitch tilt. Runs in FixedUpdate on both client and server.
 /// Remote players display correct pitch tilt via the replicated Rotation.
+///
+/// Compatible with the dynamic rigid body: `LockedAxes` prevents the avian
+/// integrator from rotating the capsule, so our direct Rotation writes persist
+/// through the physics step.
 pub fn sync_rotation_from_yaw(
     mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), (With<PlayerId>, Without<Interpolated>)>,
 ) {
@@ -452,7 +354,7 @@ pub fn pre_rotate_move_input(
         return;
     }
     let yaw = player_yaw.0;
-    // WASD yields: x = strafe (+right), y = forward (+up on screen = +W).
+    // WASD yields: x = strafe (+right), y = forward (+W).
     // World forward at yaw=0 is -Z, world right at yaw=0 is +X.
     let forward = Vec2::new(-yaw.sin(), -yaw.cos());
     let right = Vec2::new(yaw.cos(), -yaw.sin());

@@ -10,7 +10,7 @@ use lightyear_avian3d::prelude::{LagCompensationHistory, LagCompensationPlugin, 
 use avian3d::prelude::SpatialQueryFilter;
 
 use multiplayer::auth::{self, VerifiedWallets};
-use multiplayer::player::{player_physics_bundle, player_replicated_bundle, select_spawn_point};
+use multiplayer::player::{player_physics_bundle_dynamic, player_replicated_bundle, select_spawn_point};
 use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerActions, PlayerId, PlayerDead, PlayerEquipped, PlayerHealth, PlayerDisplayId, PlayerInventory, PlayerYaw, PlayerPitch, WalletAuthMessage};
 use multiplayer::solana::{self, RespawnAuth, RespawnConfig, WalletAddress};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics, Equippable};
@@ -188,7 +188,7 @@ fn handle_connected(
 
     commands.spawn((
         player_replicated_bundle(client_id_bits),
-        player_physics_bundle(),
+        player_physics_bundle_dynamic(),
         PlayerDisplayId(display_id),
         // WalletAddress starts empty — populated after auth verification
         WalletAddress::default(),
@@ -444,7 +444,16 @@ fn check_player_death(
 ///   ANIMA_RESPAWN token balance or SOL balance via Solana RPC.
 fn process_respawns(
     mut pending: ResMut<PendingRespawns>,
-    mut query: Query<(&mut PlayerHealth, &mut Position, &mut avian3d::prelude::Rotation, &PlayerId, &mut PlayerEquipped, &mut PlayerInventory), With<PlayerDead>>,
+    mut query: Query<(
+        &mut PlayerHealth,
+        &mut Position,
+        &mut avian3d::prelude::Rotation,
+        &mut avian3d::prelude::LinearVelocity,
+        &mut avian3d::prelude::AngularVelocity,
+        &PlayerId,
+        &mut PlayerEquipped,
+        &mut PlayerInventory,
+    ), With<PlayerDead>>,
     living_query: Query<&Position, (With<PlayerId>, Without<PlayerDead>)>,
     mut commands: Commands,
     time: Res<Time>,
@@ -457,7 +466,7 @@ fn process_respawns(
         if now >= pending.timers[i].1 {
             let (entity, _) = pending.timers.remove(i);
 
-            let Ok((mut health, mut position, mut rotation, player_id, mut equipped, mut inventory)) = query.get_mut(entity) else {
+            let Ok((mut health, mut position, mut rotation, mut lin_vel, mut ang_vel, player_id, mut equipped, mut inventory)) = query.get_mut(entity) else {
                 continue;
             };
 
@@ -473,6 +482,11 @@ fn process_respawns(
                     health.0 = 100;
                     position.0 = spawn_pos;
                     rotation.0 = Quat::IDENTITY;
+                    // Reset avian velocities — otherwise kill-plane death leaves
+                    // residual -Y velocity that would slingshot the respawned
+                    // player back downwards.
+                    lin_vel.0 = Vec3::ZERO;
+                    ang_vel.0 = Vec3::ZERO;
                     // Ensure inventory is clean on respawn (should already be empty from death drop)
                     equipped.0 = None;
                     inventory.items.clear();

@@ -19,14 +19,20 @@ pub struct SharedPlugin;
 
 impl Plugin for SharedPlugin {
     fn build(&self, app: &mut App) {
-        // Protocol: components + BEI input registration
+        // Protocol: components + leafwing input registration
         app.add_plugins(protocol::ProtocolPlugin);
 
-        // Avian3d physics with lightyear integration
-        // PositionButInterpolateTransform: lightyear handles Position→Transform sync
-        // with smooth correction for predicted entities and interpolation for remote entities.
+        // Avian3d physics with lightyear integration.
+        //
+        // `Position` mode: lightyear replicates & rolls back `Position`/`Rotation`
+        // directly (matching the `lightyear/examples/avian_3d_character` pattern).
+        // This is the right choice for a dynamic rigid body controller because
+        // avian's integrator is the authority on Position, and lightyear's
+        // prediction replays the same forces/impulses through the integrator to
+        // get a deterministic result — no bespoke Position writebacks to clash
+        // with lightyear.
         app.add_plugins(LightyearAvianPlugin {
-            replication_mode: AvianReplicationMode::PositionButInterpolateTransform,
+            replication_mode: AvianReplicationMode::Position,
             ..default()
         });
         app.add_plugins(
@@ -34,32 +40,27 @@ impl Plugin for SharedPlugin {
                 .build()
                 .disable::<PhysicsTransformPlugin>()
                 .disable::<PhysicsInterpolationPlugin>()
+                // Sleeping can stash state that doesn't survive rollback cleanly.
                 .disable::<IslandPlugin>()
                 .disable::<IslandSleepingPlugin>(),
         );
 
-        // Disable gravity for kinematic players (we handle gravity ourselves).
-        // Other dynamic entities (like ore chunks) still use default gravity.
+        // Real gravity — avian integrates it into dynamic bodies each tick.
+        // The old code zeroed gravity because our custom kinematic controller
+        // applied its own; now avian owns the whole vertical axis.
         app.insert_resource(Gravity(Vec3::new(0.0, -9.81, 0.0)));
 
-        // Note: FrameInterpolationPlugin is NOT needed — PositionButInterpolateTransform
-        // mode handles Position→Transform and Rotation→Transform sync with smooth correction.
-
-        // Shared FixedUpdate systems. These replace the old BEI `On<Fire<...>>`
-        // observers — leafwing's ActionState is snapshot/restored cleanly during
-        // lightyear rollback, so movement/look/jump/interact/etc can be replayed
-        // without the rubber-banding that event-based observers caused.
-        //
-        // Movement reads the world-space Move axis (rotated on the client before
-        // BufferClientInputs). With zero input the movement system zeros XZ vel
-        // directly — no separate clear_xz_velocity step required.
+        // Shared FixedUpdate systems. `handle_character_actions` replaces our
+        // old custom kinematic controller: it walks every player, reads the
+        // leafwing ActionState, and applies forces/impulses via avian's
+        // `Forces` query data. The avian `PhysicsSchedule` (in FixedPostUpdate)
+        // then integrates those forces into Position — the same integration
+        // runs again on replay, which is what keeps us rollback-deterministic.
         app.add_systems(
             FixedUpdate,
             (
                 player::shared_look_system,
-                player::shared_movement_system,
-                player::shared_jump_system,
-                player::character_controller,
+                player::handle_character_actions,
                 player::sync_rotation_from_yaw,
                 world::shared_door_interact_system,
                 world::shared_equip_interact_system,
