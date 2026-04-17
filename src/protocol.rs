@@ -54,11 +54,6 @@ impl_vector_space_f32!(PlayerPitch);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct PlayerPitch(pub f32);
 
-/// Player velocity managed by our kinematic character controller.
-/// Not Avian's LinearVelocity — we own this completely.
-#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct CharacterVelocity(pub Vec3);
-
 // --- Input Actions (leafwing) ---
 //
 // Single enum replaces the per-struct BEI actions. `ActionState<PlayerActions>`
@@ -238,10 +233,16 @@ impl Plugin for ProtocolPlugin {
             .add_linear_interpolation()
             .enable_correction();
 
-        // Our kinematic velocity (replaces Avian's LinearVelocity for players)
-        app.register_component::<CharacterVelocity>()
+        // Avian's authoritative dynamic-body velocities. Replicated + predicted
+        // so the client can integrate locally between server snapshots and the
+        // server's motion stays authoritative. Threshold absorbs ~4 ticks of
+        // per-tick gravity delta.
+        app.register_component::<LinearVelocity>()
             .add_prediction()
-            .add_should_rollback(velocity_should_rollback);
+            .add_should_rollback(linear_velocity_should_rollback);
+        app.register_component::<AngularVelocity>()
+            .add_prediction()
+            .add_should_rollback(angular_velocity_should_rollback);
 
         // World object components — replicated, server-authoritative (no prediction)
         app.register_component::<crate::world::DoorState>();
@@ -282,8 +283,14 @@ fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
     this.angle_between(*that) >= 0.05 // ~3°
 }
 
-// Per-tick velocity delta from gravity is 0.5 m/s; threshold needs to be much larger
-// to absorb input timing jitter without thrashing.
-fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
-    (this.0 - that.0).length() >= 2.0 // 2 m/s — 4x the per-tick gravity delta
+// Per-tick velocity delta from gravity is ~0.15 m/s; threshold needs to be
+// much larger than that to absorb input timing jitter without thrashing.
+fn linear_velocity_should_rollback(this: &LinearVelocity, that: &LinearVelocity) -> bool {
+    (this.0 - that.0).length() >= 2.0 // 2 m/s
+}
+
+// Locked rotation means angular velocity is effectively always zero on players,
+// so almost any drift is noise; keep the gate permissive.
+fn angular_velocity_should_rollback(this: &AngularVelocity, that: &AngularVelocity) -> bool {
+    (this.0 - that.0).length() >= 1.0
 }

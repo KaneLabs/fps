@@ -1138,9 +1138,11 @@ fn on_predicted_spawn(
         .map(|p| Transform::from_translation(p.0))
         .unwrap_or(Transform::from_translation(PLAYER_SPAWN_POS));
 
-    // All predicted entities get physics + basic components
+    // All predicted entities get dynamic physics — our character controller
+    // now lives entirely in avian's integrator, so predicted clients must
+    // simulate the same forces/impulses the server does.
     commands.entity(entity).insert((
-        player_physics_bundle(),
+        player_physics_bundle_dynamic(),
         Player { id: player_id.0 },
         spawn_transform,
         Visibility::default(),
@@ -1227,8 +1229,13 @@ fn on_interpolated_spawn(
 
     info!("[SPAWN] Remote interpolated player spawned: {:?} (id={})", entity, player_id.0);
 
+    // Interpolated (remote) players get a Kinematic body so avian's gravity
+    // doesn't tug them down between replication snapshots — lightyear drives
+    // their Position/Rotation from interpolated history. The collider is
+    // still present so local ray-casts (tracers, prediction-only visuals)
+    // can hit them.
     commands.entity(entity).insert((
-        player_physics_bundle(),
+        player_physics_bundle_kinematic(),
         Player { id: player_id.0 },
         Mesh3d(meshes.add(Capsule3d::default())),
         MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
