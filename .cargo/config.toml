@@ -1,0 +1,19 @@
+# Cross-platform physics determinism: disable FMA (fused multiply-add) on both
+# ARM and x86 so physics math produces identical results on client (macOS ARM)
+# and server (Linux x86). Without this, `a*b + c` can differ by 1 ULP between
+# platforms — over many ticks this causes noticeable position drift and
+# rubber-banding during client-side prediction.
+#
+# Perf cost: negligible for game logic, maybe 1-2% slower in tight physics loops.
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-feature=-fma"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=-fma"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=-fma"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-fma"]

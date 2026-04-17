@@ -288,20 +288,20 @@ impl Plugin for ProtocolPlugin {
 // Prevent unnecessary rollbacks from floating-point noise.
 // Only rollback if the server/client values differ by more than a small threshold.
 
-// Very generous thresholds to prevent rollback thrashing from cross-platform
-// float non-determinism (client on macOS ARM, server on Linux x86).
-// When rollback does fire, enable_correction() smooths the visual transition.
+// Threshold must exceed "one tick of expected motion" to avoid rollback thrashing
+// when input arrival timing differs by a tick between client prediction and server.
+// At 7 m/s move speed × 15.6ms tick = 10.9cm, plus margin for FMA/transcendental drift.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 0.5 // 50cm — only correct genuine desync
+    (this.0 - that.0).length() >= 0.25 // 25cm — 2+ ticks of motion
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
-    this.angle_between(*that) >= 0.1 // ~5.7° — ignores float drift
+    this.angle_between(*that) >= 0.05 // ~3°
 }
 
-// Velocity rarely needs rollback — if position is right, velocity converges.
-// Only rollback on major mismatches (jump denied, etc).
+// Per-tick velocity delta from gravity is 0.5 m/s; threshold needs to be much larger
+// to absorb input timing jitter without thrashing.
 fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
-    (this.0 - that.0).length() >= 5.0 // 5 m/s — only correct major desync
+    (this.0 - that.0).length() >= 2.0 // 2 m/s — 4x the per-tick gravity delta
 }
 
