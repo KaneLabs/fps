@@ -54,6 +54,11 @@ impl_vector_space_f32!(PlayerPitch);
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct PlayerPitch(pub f32);
 
+/// Player velocity managed by our kinematic character controller.
+/// Not Avian's LinearVelocity — we own this completely.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct CharacterVelocity(pub Vec3);
+
 // --- Input Actions (leafwing) ---
 //
 // Single enum replaces the per-struct BEI actions. `ActionState<PlayerActions>`
@@ -233,16 +238,10 @@ impl Plugin for ProtocolPlugin {
             .add_linear_interpolation()
             .enable_correction();
 
-        // Avian's authoritative dynamic-body velocities. Replicated + predicted
-        // so the client can integrate locally between server snapshots and the
-        // server's motion stays authoritative. Threshold absorbs ~4 ticks of
-        // per-tick gravity delta.
-        app.register_component::<LinearVelocity>()
+        // Our kinematic velocity (replaces Avian's LinearVelocity for players)
+        app.register_component::<CharacterVelocity>()
             .add_prediction()
-            .add_should_rollback(linear_velocity_should_rollback);
-        app.register_component::<AngularVelocity>()
-            .add_prediction()
-            .add_should_rollback(angular_velocity_should_rollback);
+            .add_should_rollback(velocity_should_rollback);
 
         // World object components — replicated, server-authoritative (no prediction)
         app.register_component::<crate::world::DoorState>();
@@ -272,25 +271,21 @@ impl Plugin for ProtocolPlugin {
 // Prevent unnecessary rollbacks from floating-point noise.
 // Only rollback if the server/client values differ by more than a small threshold.
 
-// Threshold must exceed "one tick of expected motion" to avoid rollback thrashing
-// when input arrival timing differs by a tick between client prediction and server.
-// At 7 m/s move speed × 15.6ms tick = 10.9cm, plus margin for FMA/transcendental drift.
+// Thresholds tuned for local-authoritative feel: the client's prediction is
+// mostly trusted, server only corrects large disagreements. This avoids the
+// visible "sliding after stop" / rubber-banding caused by 1-2 ticks of input
+// timing jitter between client and server.
+//
+// When server and client drift under threshold, `enable_correction()` smooths
+// the drift into Transform over a few frames — invisible to the player.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 0.25 // 25cm — 2+ ticks of motion
+    (this.0 - that.0).length() >= 3.0 // 3 meters — exceed 2m jump peak
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
-    this.angle_between(*that) >= 0.05 // ~3°
+    this.angle_between(*that) >= 0.2 // ~11°
 }
 
-// Per-tick velocity delta from gravity is ~0.15 m/s; threshold needs to be
-// much larger than that to absorb input timing jitter without thrashing.
-fn linear_velocity_should_rollback(this: &LinearVelocity, that: &LinearVelocity) -> bool {
-    (this.0 - that.0).length() >= 2.0 // 2 m/s
-}
-
-// Locked rotation means angular velocity is effectively always zero on players,
-// so almost any drift is noise; keep the gate permissive.
-fn angular_velocity_should_rollback(this: &AngularVelocity, that: &AngularVelocity) -> bool {
-    (this.0 - that.0).length() >= 1.0
+fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
+    (this.0 - that.0).length() >= 5.0 // 5 m/s — barely ever rollback on velocity
 }

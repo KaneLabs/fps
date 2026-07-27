@@ -74,18 +74,29 @@ fn main() {
         env!("ANIMA_BUILD_DATE"),
     );
 
+    // Asset root — works for cargo run, raw binary, .app bundle.
+    let asset_path = multiplayer::asset_root_path();
+    eprintln!("Assets: {asset_path}");
+
     // Load or generate persistent Ed25519 keypair (~/.anima/keypair.json)
     let identity = multiplayer::auth::ClientIdentity::load_or_create();
     info!("Client identity: {} (id={})", identity.address, identity.client_id);
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: asset_path,
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
     .insert_resource(ClearColor(Color::BLACK));
     app.insert_resource(identity);
     app.add_plugins(EguiPlugin::default());
@@ -1138,11 +1149,9 @@ fn on_predicted_spawn(
         .map(|p| Transform::from_translation(p.0))
         .unwrap_or(Transform::from_translation(PLAYER_SPAWN_POS));
 
-    // All predicted entities get dynamic physics — our character controller
-    // now lives entirely in avian's integrator, so predicted clients must
-    // simulate the same forces/impulses the server does.
+    // All predicted entities get physics + basic components
     commands.entity(entity).insert((
-        player_physics_bundle_dynamic(),
+        player_physics_bundle(),
         Player { id: player_id.0 },
         spawn_transform,
         Visibility::default(),
@@ -1229,13 +1238,8 @@ fn on_interpolated_spawn(
 
     info!("[SPAWN] Remote interpolated player spawned: {:?} (id={})", entity, player_id.0);
 
-    // Interpolated (remote) players get a Kinematic body so avian's gravity
-    // doesn't tug them down between replication snapshots — lightyear drives
-    // their Position/Rotation from interpolated history. The collider is
-    // still present so local ray-casts (tracers, prediction-only visuals)
-    // can hit them.
     commands.entity(entity).insert((
-        player_physics_bundle_kinematic(),
+        player_physics_bundle(),
         Player { id: player_id.0 },
         Mesh3d(meshes.add(Capsule3d::default())),
         MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
