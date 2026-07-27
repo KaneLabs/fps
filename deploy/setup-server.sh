@@ -12,6 +12,9 @@ SERVICE_NAME="anima-server"
 GAME_USER="anima"
 GAME_PORT=5000
 
+echo "==> Installing dependencies..."
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip
+
 echo "==> Creating game user..."
 if ! id "${GAME_USER}" &>/dev/null; then
   sudo useradd --system --no-create-home --shell /usr/sbin/nologin "${GAME_USER}"
