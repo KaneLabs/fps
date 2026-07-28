@@ -338,8 +338,7 @@ pub fn character_controller(
         results.push((entity, pos, vel));
     }
 
-    // 3. Write back results
-    drop(spatial);
+    // 3. Write back results (NLL ends the `spatial` borrow at its last use above)
     let mut writeback = params.p2();
     for (entity, new_pos, new_vel) in results {
         if let Ok((mut pos, mut vel)) = writeback.get_mut(entity) {

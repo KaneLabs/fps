@@ -282,6 +282,7 @@ fn setup_egui_fonts(mut contexts: EguiContexts, mut commands: Commands) {
 // ========================================
 
 /// Cinzel font ID at the given size (regular weight).
+#[allow(dead_code)]
 fn cinzel(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("cinzel".into()))
 }
@@ -302,11 +303,13 @@ fn chakra(size: f32) -> egui::FontId {
 }
 
 /// Chakra Petch SemiBold font ID at the given size.
+#[allow(dead_code)]
 fn chakra_semi(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("chakra_semi".into()))
 }
 
 /// Chakra Petch Bold font ID at the given size.
+#[allow(dead_code)]
 fn chakra_bold(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("chakra_bold".into()))
 }
@@ -567,7 +570,7 @@ fn menu_ui(
             ui.painter().text(
                 egui::pos2(rect.right() - 20.0, rect.bottom() - 20.0),
                 egui::Align2::RIGHT_BOTTOM,
-                &format!("v{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_SHORT_HASH")),
+                format!("v{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_SHORT_HASH")),
                 chakra(11.0),
                 cream(0.2),
             );
@@ -846,7 +849,7 @@ fn health_hud(
     let Ok(health) = player_query.single() else { return; };
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let bar_w = 200.0;
     let bar_h = 16.0;
     let bar_x = (screen.width() - bar_w) / 2.0;
@@ -907,7 +910,7 @@ fn crosshair_hud(
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return; };
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let center = egui::pos2(screen.width() / 2.0, screen.height() / 2.0);
     let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180);
     let stroke = egui::Stroke::new(1.5, color);
@@ -945,7 +948,7 @@ fn inventory_hud(
         return;
     }
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     egui::Area::new(egui::Id::new("inventory_hud"))
         .fixed_pos(egui::pos2(16.0, screen.height() - 140.0))
@@ -998,7 +1001,7 @@ fn inventory_hud(
 /// Version from Cargo.toml + short git commit hash baked in at compile time.
 fn build_version_hud(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else { return; };
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"), "-", env!("GIT_SHORT_HASH"));
 
@@ -1042,7 +1045,7 @@ fn death_screen(
 
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("death_overlay")));
 
     // Dark red overlay
@@ -1084,7 +1087,7 @@ fn kill_feed_ui(
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
     let now = time.elapsed_secs();
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     // Collect recent kills (within KILL_FEED_DURATION seconds)
     let mut entries: Vec<&multiplayer::protocol::KillFeedEntry> = feed_query

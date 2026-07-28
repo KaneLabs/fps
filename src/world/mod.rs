@@ -1907,10 +1907,10 @@ pub fn shared_equip_interact_system(
         let mut closest: Option<(Entity, f32, String)> = None;
         for (entity, eq_pos, equippable) in equippable_query.iter() {
             let dist = player_pos.0.distance(eq_pos.0);
-            if dist <= equippable.interaction_distance {
-                if closest.as_ref().is_none_or(|(_, d, _)| dist < *d) {
-                    closest = Some((entity, dist, equippable.name.clone()));
-                }
+            if dist <= equippable.interaction_distance
+                && closest.as_ref().is_none_or(|(_, d, _)| dist < *d)
+            {
+                closest = Some((entity, dist, equippable.name.clone()));
             }
         }
 
@@ -2036,7 +2036,7 @@ pub fn shared_primary_action_system(
                 .iter()
                 .find(|e| e.name == *name)
                 .and_then(|e| e.muzzle_offset)
-                .map(|o| Vec3::from_array(o))
+                .map(Vec3::from_array)
                 .unwrap_or(Vec3::new(0.2, -0.1, -0.9));
 
             let cam_rot = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);

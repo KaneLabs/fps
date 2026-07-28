@@ -385,8 +385,7 @@ fn check_player_death(
         // Move matching world Equippable entities to the death position.
         // Spread items slightly so they don't stack on the exact same spot.
         let drop_pos = death_pos.0;
-        let mut drop_index = 0u32;
-        for item_name in &items_to_drop {
+        for (drop_index, item_name) in items_to_drop.iter().enumerate() {
             // Small offset so items fan out in a circle around the death spot
             let angle = drop_index as f32 * std::f32::consts::TAU / items_to_drop.len().max(1) as f32;
             let offset = if items_to_drop.len() > 1 {
@@ -408,7 +407,6 @@ fn check_player_death(
             if !found {
                 info!("[DEATH DROP] No world entity found for '{}' — skipping", item_name);
             }
-            drop_index += 1;
         }
 
         if !items_to_drop.is_empty() {
