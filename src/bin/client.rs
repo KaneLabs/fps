@@ -745,13 +745,37 @@ fn despawn_menu(
     }
 }
 
+/// Resolve the game server address. Priority:
+/// 1. ANIMA_SERVER_ADDR env var (IP or hostname, for local dev)
+/// 2. DNS: play.playanima.com (lets us move servers without rebuilding clients)
+/// 3. Hardcoded static IP fallback (if DNS is unreachable/unconfigured)
+fn resolve_server_addr() -> SocketAddr {
+    use std::net::ToSocketAddrs;
+    const FALLBACK_IP: Ipv4Addr = Ipv4Addr::new(44, 235, 228, 56);
+    const SERVER_DNS: &str = "play.playanima.com";
+
+    let host = std::env::var("ANIMA_SERVER_ADDR").unwrap_or_else(|_| SERVER_DNS.to_string());
+
+    // Direct IP (fast path, no DNS lookup)
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return SocketAddr::new(ip.into(), SERVER_PORT);
+    }
+    // Hostname → first IPv4 result
+    match (host.as_str(), SERVER_PORT).to_socket_addrs() {
+        Ok(addrs) => addrs
+            .filter(|a| a.is_ipv4())
+            .next()
+            .unwrap_or_else(|| SocketAddr::new(FALLBACK_IP.into(), SERVER_PORT)),
+        Err(e) => {
+            warn!("DNS lookup for {host} failed ({e}), using fallback IP");
+            SocketAddr::new(FALLBACK_IP.into(), SERVER_PORT)
+        }
+    }
+}
+
 fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
-    // Default to production server; override with ANIMA_SERVER_ADDR for local dev
-    let server_ip: Ipv4Addr = std::env::var("ANIMA_SERVER_ADDR")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or([146, 71, 85, 180].into());
-    let server_addr = SocketAddr::new(server_ip.into(), SERVER_PORT);
+    let server_addr = resolve_server_addr();
+    info!("Game server: {server_addr}");
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
     let auth = Authentication::Manual {

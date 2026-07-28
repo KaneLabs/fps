@@ -412,7 +412,8 @@ jobs:
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          SSH_OPTS="-o StrictHostKeyChecking=no -i ~/.ssh/deploy_key -p ${DEPLOY_PORT:-22}"
+          # -o Port= works for both ssh and scp (scp's -p means "preserve", not port)
+          SSH_OPTS="-o StrictHostKeyChecking=no -o Port=${DEPLOY_PORT:-22} -i ~/.ssh/deploy_key"
 
           scp $SSH_OPTS anima-linux-server.zip "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/anima-linux-server.zip"
 
