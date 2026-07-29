@@ -802,12 +802,15 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
             PeerAddr(server_addr),
             ReplicationReceiver::default(),
             PredictionManager::default(),
-            // Valorant-style adaptive input buffering: cover up to ~3 ticks (~47ms
-            // at 64Hz) of latency with input delay so the server almost always has
-            // the client's REAL input when it simulates a tick — mispredictions at
-            // sharp input transitions (jump press, strafe start) mostly vanish.
-            // Latency beyond that is covered by prediction/rollback as before.
-            InputTimelineConfig::new(SyncConfig::default(), InputDelayConfig::balanced()),
+            // NOTE: do NOT insert a custom InputTimelineConfig with input delay.
+            // Playtest 2026-07-29 (v0.3.0-350a630): InputDelayConfig::balanced()
+            // made every action feel like a full server roundtrip and caused
+            // constant vibration — lightyear recomputes the adaptive delay on
+            // every sync event, so RTT jitter flaps the delay value and each flap
+            // shifts the input timeline (a resync). Client::default() provides
+            // the default config (zero input delay, full prediction), which is
+            // the correct feel for a shooter. Revisit only with a FIXED delay
+            // and only if transition mispredictions return.
             ReplicationSender::new(
                 Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
                 SendUpdatesMode::SinceLastAck,
