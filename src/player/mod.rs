@@ -16,7 +16,7 @@ use crate::protocol::{
 };
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
-pub const JUMP_SPEED: f32 = 10.0;
+pub const JUMP_SPEED: f32 = 12.0;  // ~2.25m jump, ~0.75s air time
 pub const GRAVITY: f32 = 32.0;
 pub const SKIN_WIDTH: f32 = 0.02;
 pub const STEP_HEIGHT: f32 = 0.1;
@@ -178,7 +178,11 @@ pub fn shared_jump_system(
         if is_interpolated || is_dead {
             continue;
         }
-        if !action.just_pressed(&PlayerActions::Jump) {
+        // Use `pressed` rather than `just_pressed` — `just_pressed` depends on
+        // state-transition tracking which is brittle across replication/rollback.
+        // The `vel.0.y > 0.5` guard below ensures we only fire once per jump
+        // (after liftoff, y velocity > 0.5 until we've fallen back to ground).
+        if !action.pressed(&PlayerActions::Jump) {
             continue;
         }
         if vel.0.y > 0.5 {
@@ -334,8 +338,7 @@ pub fn character_controller(
         results.push((entity, pos, vel));
     }
 
-    // 3. Write back results
-    drop(spatial);
+    // 3. Write back results (NLL ends the `spatial` borrow at its last use above)
     let mut writeback = params.p2();
     for (entity, new_pos, new_vel) in results {
         if let Ok((mut pos, mut vel)) = writeback.get_mut(entity) {
@@ -423,10 +426,14 @@ pub fn log_player_state(
 /// both facing direction and pitch tilt. Runs in FixedUpdate on both client and server.
 /// Remote players display correct pitch tilt via the replicated Rotation.
 pub fn sync_rotation_from_yaw(
-    mut query: Query<(&PlayerYaw, &PlayerPitch, &mut Rotation), (With<PlayerId>, Without<Interpolated>)>,
+    mut query: Query<(&PlayerYaw, &mut Rotation), (With<PlayerId>, Without<Interpolated>)>,
 ) {
-    for (yaw, pitch, mut rot) in query.iter_mut() {
-        rot.0 = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);
+    // Capsule body stays upright — only yaw rotates the rigid body.
+    // Pitch is applied to the camera child locally (see sync_camera_pitch),
+    // so the capsule collider never tilts. Tilting the capsule breaks
+    // grounded raycasts and ground collision.
+    for (yaw, mut rot) in query.iter_mut() {
+        rot.0 = Quat::from_rotation_y(yaw.0);
     }
 }
 
@@ -476,20 +483,21 @@ pub fn gate_look_on_cursor(
     }
 }
 
-/// Client-only: ensures the camera child has identity rotation.
-/// The parent's Rotation now includes both yaw and pitch (via sync_rotation_from_yaw),
-/// so the camera child inherits the correct orientation automatically.
+/// Client-only: applies pitch to the camera locally.
+/// Parent player Rotation contains only yaw (capsule stays upright), so the
+/// camera child must apply pitch on its own Transform to look up/down.
 pub fn sync_camera_pitch(
-    player_query: Query<&Children, With<Controlled>>,
+    player_query: Query<(&PlayerPitch, &Children), With<Controlled>>,
     mut camera_query: Query<&mut Transform, With<crate::world::WorldModelCamera>>,
 ) {
-    let Ok(children) = player_query.single() else {
+    let Ok((pitch, children)) = player_query.single() else {
         return;
     };
 
     for child in children.iter() {
         if let Ok(mut cam_transform) = camera_query.get_mut(child) {
-            cam_transform.rotation = Quat::IDENTITY;
+            // Pitch around X only — yaw comes from parent, no roll.
+            cam_transform.rotation = Quat::from_rotation_x(pitch.0);
         }
     }
 }

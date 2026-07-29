@@ -271,19 +271,21 @@ impl Plugin for ProtocolPlugin {
 // Prevent unnecessary rollbacks from floating-point noise.
 // Only rollback if the server/client values differ by more than a small threshold.
 
-// Threshold must exceed "one tick of expected motion" to avoid rollback thrashing
-// when input arrival timing differs by a tick between client prediction and server.
-// At 7 m/s move speed × 15.6ms tick = 10.9cm, plus margin for FMA/transcendental drift.
+// Thresholds tuned for local-authoritative feel: the client's prediction is
+// mostly trusted, server only corrects large disagreements. This avoids the
+// visible "sliding after stop" / rubber-banding caused by 1-2 ticks of input
+// timing jitter between client and server.
+//
+// When server and client drift under threshold, `enable_correction()` smooths
+// the drift into Transform over a few frames — invisible to the player.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 0.25 // 25cm — 2+ ticks of motion
+    (this.0 - that.0).length() >= 3.0 // 3 meters — exceed 2m jump peak
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
-    this.angle_between(*that) >= 0.05 // ~3°
+    this.angle_between(*that) >= 0.2 // ~11°
 }
 
-// Per-tick velocity delta from gravity is 0.5 m/s; threshold needs to be much larger
-// to absorb input timing jitter without thrashing.
 fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
-    (this.0 - that.0).length() >= 2.0 // 2 m/s — 4x the per-tick gravity delta
+    (this.0 - that.0).length() >= 5.0 // 5 m/s — barely ever rollback on velocity
 }

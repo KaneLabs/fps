@@ -343,10 +343,17 @@ const DOOR_INTERACT_DISTANCE: f32 = 4.0;
 ///   - Uneven terrain with elevation changes
 ///   - Pine tree trunks throughout the perimeter
 pub fn spawn_world_physics(mut commands: Commands) {
-    // Helper for static collider spawning
+    // Helper for static collider spawning.
+    //
+    // With `AvianReplicationMode::Position`, avian treats `Position`/`Rotation`
+    // as the source of truth — not `Transform`. The old code set Transform only,
+    // so every world collider was effectively at the origin for physics purposes,
+    // causing the player's dynamic body to fall through geometry stacked at
+    // (0,0,0). Always set `Position` (and `Rotation` for the rotated variant).
     let sc = |commands: &mut Commands, pos: Vec3, size: Vec3, friction: f32| {
         commands.spawn((
-            Transform::from_translation(pos),
+            Position::new(pos),
+            Rotation::default(),
             RigidBody::Static,
             Collider::cuboid(size.x, size.y, size.z),
             Friction::new(friction),
@@ -354,7 +361,8 @@ pub fn spawn_world_physics(mut commands: Commands) {
     };
     let sc_rot = |commands: &mut Commands, pos: Vec3, rot: Quat, size: Vec3, friction: f32| {
         commands.spawn((
-            Transform::from_translation(pos).with_rotation(rot),
+            Position::new(pos),
+            Rotation(rot),
             RigidBody::Static,
             Collider::cuboid(size.x, size.y, size.z),
             Friction::new(friction),
@@ -739,6 +747,7 @@ pub fn spawn_world_model(
     commands.spawn((
         Mesh3d(floor_mesh),
         MeshMaterial3d(dead_grass.clone()),
+        Position::new(Vec3::new(0.0, -0.05, -20.0)),
         Transform::from_xyz(0.0, -0.05, -20.0),
         RigidBody::Static,
         Collider::cuboid(120.0, 0.1, 120.0),
@@ -752,6 +761,7 @@ pub fn spawn_world_model(
     commands.spawn((
         Mesh3d(clearing),
         MeshMaterial3d(dirt.clone()),
+        Position::new(Vec3::new(0.0, 0.05, 0.0)),
         Transform::from_xyz(0.0, 0.05, 0.0),
         RigidBody::Static,
         Collider::cuboid(20.0, 0.1, 16.0),
@@ -770,6 +780,7 @@ pub fn spawn_world_model(
         let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
         commands.spawn((
             Mesh3d(m), MeshMaterial3d(grass.clone()),
+            Position::new(pos),
             Transform::from_translation(pos),
             RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
             Friction::new(0.6), rl.clone(),
@@ -784,6 +795,7 @@ pub fn spawn_world_model(
         let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
         commands.spawn((
             Mesh3d(m), MeshMaterial3d(grass.clone()),
+            Position::new(pos),
             Transform::from_translation(pos),
             RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
             Friction::new(0.5), rl.clone(),
@@ -798,6 +810,7 @@ pub fn spawn_world_model(
         let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
         commands.spawn((
             Mesh3d(m), MeshMaterial3d(rock_red.clone()),
+            Position::new(pos),
             Transform::from_translation(pos),
             RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
             Friction::new(0.6), rl.clone(),
@@ -808,6 +821,7 @@ pub fn spawn_world_model(
     let trail = meshes.add(Cuboid::new(4.0, 0.04, 12.0));
     commands.spawn((
         Mesh3d(trail), MeshMaterial3d(dirt_light.clone()),
+        Position::new(Vec3::new(0.0, 0.02, 14.0)),
         Transform::from_xyz(0.0, 0.02, 14.0),
         RigidBody::Static, Collider::cuboid(4.0, 0.04, 12.0),
         Friction::new(0.3), rl.clone(),
@@ -822,6 +836,7 @@ pub fn spawn_world_model(
     let cabin_floor = meshes.add(Cuboid::new(8.0, 0.2, 6.0));
     commands.spawn((
         Mesh3d(cabin_floor), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.3, 0.0)),
         Transform::from_xyz(0.0, 0.3, 0.0),
         RigidBody::Static, Collider::cuboid(8.0, 0.2, 6.0),
         Friction::new(0.3), rl.clone(),
@@ -836,6 +851,7 @@ pub fn spawn_world_model(
     // West wall
     commands.spawn((
         Mesh3d(cabin_wall_long.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-4.0, 1.7, 0.0)),
         Transform::from_xyz(-4.0, 1.7, 0.0),
         RigidBody::Static, Collider::cuboid(0.4, 2.8, 6.0),
         Friction::new(0.2), rl.clone(),
@@ -844,6 +860,7 @@ pub fn spawn_world_model(
     // East wall
     commands.spawn((
         Mesh3d(cabin_wall_long.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(4.0, 1.7, 0.0)),
         Transform::from_xyz(4.0, 1.7, 0.0),
         RigidBody::Static, Collider::cuboid(0.4, 2.8, 6.0),
         Friction::new(0.2), rl.clone(),
@@ -852,6 +869,7 @@ pub fn spawn_world_model(
     // North wall (solid back)
     commands.spawn((
         Mesh3d(cabin_wall_short.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(0.0, 1.7, -3.0)),
         Transform::from_xyz(0.0, 1.7, -3.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.4, 2.8, 8.0),
@@ -861,6 +879,7 @@ pub fn spawn_world_model(
     // South wall — left of doorway
     commands.spawn((
         Mesh3d(cabin_half_wall.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-2.75, 1.7, 3.0)),
         Transform::from_xyz(-2.75, 1.7, 3.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.4, 2.8, 2.5),
@@ -870,6 +889,7 @@ pub fn spawn_world_model(
     // South wall — right of doorway
     commands.spawn((
         Mesh3d(cabin_half_wall.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(2.75, 1.7, 3.0)),
         Transform::from_xyz(2.75, 1.7, 3.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.4, 2.8, 2.5),
@@ -881,6 +901,7 @@ pub fn spawn_world_model(
     let roof = meshes.add(Cuboid::new(9.0, 0.2, 7.0));
     commands.spawn((
         Mesh3d(roof), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(0.0, 3.3, 0.0)),
         Transform::from_xyz(0.0, 3.3, 0.0),
         RigidBody::Static, Collider::cuboid(9.0, 0.2, 7.0),
         Friction::new(0.2), rl.clone(),
@@ -891,6 +912,7 @@ pub fn spawn_world_model(
     let porch_floor = meshes.add(Cuboid::new(8.0, 0.15, 3.0));
     commands.spawn((
         Mesh3d(porch_floor), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.2, 5.5)),
         Transform::from_xyz(0.0, 0.2, 5.5),
         RigidBody::Static, Collider::cuboid(8.0, 0.15, 3.0),
         Friction::new(0.3), rl.clone(),
@@ -902,18 +924,21 @@ pub fn spawn_world_model(
     let railing_front = meshes.add(Cuboid::new(0.2, 0.8, 8.0));
     commands.spawn((
         Mesh3d(railing_side.clone()), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(-3.9, 0.7, 5.5)),
         Transform::from_xyz(-3.9, 0.7, 5.5),
         RigidBody::Static, Collider::cuboid(0.2, 0.8, 3.0),
         Friction::new(0.2), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(railing_side), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(3.9, 0.7, 5.5)),
         Transform::from_xyz(3.9, 0.7, 5.5),
         RigidBody::Static, Collider::cuboid(0.2, 0.8, 3.0),
         Friction::new(0.2), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(railing_front), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.7, 7.0)),
         Transform::from_xyz(0.0, 0.7, 7.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.2, 0.8, 8.0),
@@ -925,12 +950,14 @@ pub fn spawn_world_model(
     let step2 = meshes.add(Cuboid::new(2.0, 0.06, 0.6));
     commands.spawn((
         Mesh3d(step1), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.12, 7.5)),
         Transform::from_xyz(0.0, 0.12, 7.5),
         RigidBody::Static, Collider::cuboid(2.0, 0.12, 0.6),
         Friction::new(0.3), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(step2), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.06, 8.0)),
         Transform::from_xyz(0.0, 0.06, 8.0),
         RigidBody::Static, Collider::cuboid(2.0, 0.06, 0.6),
         Friction::new(0.3), rl.clone(),
@@ -940,6 +967,7 @@ pub fn spawn_world_model(
     let table = meshes.add(Cuboid::new(2.0, 0.8, 1.2));
     commands.spawn((
         Mesh3d(table), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(0.0, 0.4, -1.0)),
         Transform::from_xyz(0.0, 0.4, -1.0),
         RigidBody::Static, Collider::cuboid(2.0, 0.8, 1.2),
         Friction::new(0.2), rl.clone(),
@@ -950,6 +978,7 @@ pub fn spawn_world_model(
     let hearth = meshes.add(Cuboid::new(2.0, 1.0, 1.0));
     commands.spawn((
         Mesh3d(hearth), MeshMaterial3d(fireplace_stone.clone()),
+        Position::new(Vec3::new(0.0, 0.5, -2.5)),
         Transform::from_xyz(0.0, 0.5, -2.5),
         RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.0),
         Friction::new(0.4), rl.clone(),
@@ -969,6 +998,7 @@ pub fn spawn_world_model(
     let chimney = meshes.add(Cuboid::new(1.2, 3.0, 1.2));
     commands.spawn((
         Mesh3d(chimney), MeshMaterial3d(chimney_stone.clone()),
+        Position::new(Vec3::new(0.0, 3.0, -2.8)),
         Transform::from_xyz(0.0, 3.0, -2.8),
         RigidBody::Static, Collider::cuboid(1.2, 3.0, 1.2),
         Friction::new(0.4), rl.clone(),
@@ -983,6 +1013,7 @@ pub fn spawn_world_model(
     let shed_floor = meshes.add(Cuboid::new(5.0, 0.15, 4.0));
     commands.spawn((
         Mesh3d(shed_floor), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(-14.0, 0.15, 2.0)),
         Transform::from_xyz(-14.0, 0.15, 2.0),
         RigidBody::Static, Collider::cuboid(5.0, 0.15, 4.0),
         Friction::new(0.3), rl.clone(),
@@ -997,6 +1028,7 @@ pub fn spawn_world_model(
 
     commands.spawn((
         Mesh3d(shed_wall_w), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-16.5, 1.2, 2.0)),
         Transform::from_xyz(-16.5, 1.2, 2.0),
         RigidBody::Static, Collider::cuboid(0.3, 2.4, 4.0),
         Friction::new(0.2), rl.clone(),
@@ -1005,12 +1037,14 @@ pub fn spawn_world_model(
     // East side — open with posts
     commands.spawn((
         Mesh3d(shed_post.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-11.5, 1.2, 4.0)),
         Transform::from_xyz(-11.5, 1.2, 4.0),
         RigidBody::Static, Collider::cuboid(0.3, 2.4, 0.3),
         Friction::new(0.2), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(shed_post), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-11.5, 1.2, 0.0)),
         Transform::from_xyz(-11.5, 1.2, 0.0),
         RigidBody::Static, Collider::cuboid(0.3, 2.4, 0.3),
         Friction::new(0.2), rl.clone(),
@@ -1018,6 +1052,7 @@ pub fn spawn_world_model(
     // North wall
     commands.spawn((
         Mesh3d(shed_wall_n), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-14.0, 1.2, 0.0)),
         Transform::from_xyz(-14.0, 1.2, 0.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.3, 2.4, 5.0),
@@ -1027,6 +1062,7 @@ pub fn spawn_world_model(
     // South wall (partial)
     commands.spawn((
         Mesh3d(shed_wall_s), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(-15.0, 1.2, 4.0)),
         Transform::from_xyz(-15.0, 1.2, 4.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.3, 2.4, 2.0),
@@ -1037,6 +1073,7 @@ pub fn spawn_world_model(
     let shed_roof = meshes.add(Cuboid::new(6.0, 0.1, 5.0));
     commands.spawn((
         Mesh3d(shed_roof), MeshMaterial3d(corrugated_metal.clone()),
+        Position::new(Vec3::new(-14.0, 2.5, 2.0)),
         Transform::from_xyz(-14.0, 2.5, 2.0),
         RigidBody::Static, Collider::cuboid(6.0, 0.1, 5.0),
         Friction::new(0.2), rl.clone(),
@@ -1047,6 +1084,7 @@ pub fn spawn_world_model(
     let workbench = meshes.add(Cuboid::new(2.5, 0.8, 0.8));
     commands.spawn((
         Mesh3d(workbench), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(-15.0, 0.4, 1.5)),
         Transform::from_xyz(-15.0, 0.4, 1.5),
         RigidBody::Static, Collider::cuboid(2.5, 0.8, 0.8),
         Friction::new(0.2), rl.clone(),
@@ -1061,6 +1099,7 @@ pub fn spawn_world_model(
     let mine_floor = meshes.add(Cuboid::new(3.0, 0.1, 8.0));
     commands.spawn((
         Mesh3d(mine_floor), MeshMaterial3d(dirt.clone()),
+        Position::new(Vec3::new(22.0, 0.8, -6.0)),
         Transform::from_xyz(22.0, 0.8, -6.0),
         RigidBody::Static, Collider::cuboid(3.0, 0.1, 8.0),
         Friction::new(0.4), rl.clone(),
@@ -1071,6 +1110,7 @@ pub fn spawn_world_model(
     let mine_wall = meshes.add(Cuboid::new(0.4, 2.4, 8.0));
     commands.spawn((
         Mesh3d(mine_wall.clone()), MeshMaterial3d(mine_rock.clone()),
+        Position::new(Vec3::new(20.5, 2.0, -6.0)),
         Transform::from_xyz(20.5, 2.0, -6.0),
         RigidBody::Static, Collider::cuboid(0.4, 2.4, 8.0),
         Friction::new(0.3), rl.clone(),
@@ -1078,6 +1118,7 @@ pub fn spawn_world_model(
     ));
     commands.spawn((
         Mesh3d(mine_wall), MeshMaterial3d(mine_rock.clone()),
+        Position::new(Vec3::new(23.5, 2.0, -6.0)),
         Transform::from_xyz(23.5, 2.0, -6.0),
         RigidBody::Static, Collider::cuboid(0.4, 2.4, 8.0),
         Friction::new(0.3), rl.clone(),
@@ -1088,6 +1129,7 @@ pub fn spawn_world_model(
     let mine_ceiling = meshes.add(Cuboid::new(3.0, 0.3, 8.0));
     commands.spawn((
         Mesh3d(mine_ceiling), MeshMaterial3d(mine_rock.clone()),
+        Position::new(Vec3::new(22.0, 3.2, -6.0)),
         Transform::from_xyz(22.0, 3.2, -6.0),
         RigidBody::Static, Collider::cuboid(3.0, 0.3, 8.0),
         Friction::new(0.3), rl.clone(),
@@ -1100,18 +1142,21 @@ pub fn spawn_world_model(
     for z_off in [-3.0_f32, -6.0, -9.0] {
         commands.spawn((
             Mesh3d(beam_post.clone()), MeshMaterial3d(mine_timber.clone()),
+            Position::new(Vec3::new(20.8, 1.8, z_off)),
             Transform::from_xyz(20.8, 1.8, z_off),
             RigidBody::Static, Collider::cuboid(0.25, 2.0, 0.25),
             Friction::new(0.2), rl.clone(),
         ));
         commands.spawn((
             Mesh3d(beam_post.clone()), MeshMaterial3d(mine_timber.clone()),
+            Position::new(Vec3::new(23.2, 1.8, z_off)),
             Transform::from_xyz(23.2, 1.8, z_off),
             RigidBody::Static, Collider::cuboid(0.25, 2.0, 0.25),
             Friction::new(0.2), rl.clone(),
         ));
         commands.spawn((
             Mesh3d(beam_cross.clone()), MeshMaterial3d(mine_timber.clone()),
+            Position::new(Vec3::new(22.0, 3.0, z_off)),
             Transform::from_xyz(22.0, 3.0, z_off),
             RigidBody::Static, Collider::cuboid(2.8, 0.25, 0.25),
             Friction::new(0.2), rl.clone(),
@@ -1122,6 +1167,7 @@ pub fn spawn_world_model(
     let overhang = meshes.add(Cuboid::new(5.0, 1.0, 2.0));
     commands.spawn((
         Mesh3d(overhang), MeshMaterial3d(stone_dark.clone()),
+        Position::new(Vec3::new(22.0, 3.5, -2.0)),
         Transform::from_xyz(22.0, 3.5, -2.0),
         RigidBody::Static, Collider::cuboid(5.0, 1.0, 2.0),
         Friction::new(0.5), rl.clone(),
@@ -1142,18 +1188,21 @@ pub fn spawn_world_model(
     // Crate stack near shed
     commands.spawn((
         Mesh3d(crate_mesh_large.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(-12.0, 0.4, 4.0)),
         Transform::from_xyz(-12.0, 0.4, 4.0),
         RigidBody::Static, Collider::cuboid(1.0, 0.8, 1.0),
         Friction::new(0.3), rl.clone(), Name::new("Crate Stack 1"),
     ));
     commands.spawn((
         Mesh3d(crate_mesh_med.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(-12.0, 1.0, 4.0)),
         Transform::from_xyz(-12.0, 1.0, 4.0),
         RigidBody::Static, Collider::cuboid(0.8, 0.4, 0.8),
         Friction::new(0.3), rl.clone(), Name::new("Crate Stack 2"),
     ));
     commands.spawn((
         Mesh3d(crate_mesh_sm.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(-11.0, 0.3, 3.5)),
         Transform::from_xyz(-11.0, 0.3, 3.5),
         RigidBody::Static, Collider::cuboid(0.6, 0.6, 0.6),
         Friction::new(0.3), rl.clone(),
@@ -1162,12 +1211,14 @@ pub fn spawn_world_model(
     // Crates near cabin porch
     commands.spawn((
         Mesh3d(crate_wide.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(5.5, 0.35, 6.0)),
         Transform::from_xyz(5.5, 0.35, 6.0),
         RigidBody::Static, Collider::cuboid(1.2, 0.7, 0.8),
         Friction::new(0.3), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(crate_tiny.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(6.5, 0.25, 5.5)),
         Transform::from_xyz(6.5, 0.25, 5.5),
         RigidBody::Static, Collider::cuboid(0.5, 0.5, 0.5),
         Friction::new(0.3), rl.clone(),
@@ -1177,6 +1228,7 @@ pub fn spawn_world_model(
     for (x, z) in [(-3.0, 8.0), (-2.0, 8.5), (-2.5, 9.2)] {
         commands.spawn((
             Mesh3d(barrel_mesh.clone()), MeshMaterial3d(barrel_metal.clone()),
+            Position::new(Vec3::new(x, 0.5, z)),
             Transform::from_xyz(x, 0.5, z),
             RigidBody::Static, Collider::cuboid(0.7, 1.0, 0.7),
             Friction::new(0.3), rl.clone(),
@@ -1186,6 +1238,7 @@ pub fn spawn_world_model(
     // Crate near mine entrance
     commands.spawn((
         Mesh3d(crate_mesh_large.clone()), MeshMaterial3d(crate_wood.clone()),
+        Position::new(Vec3::new(19.5, 1.2, -3.0)),
         Transform::from_xyz(19.5, 1.2, -3.0),
         RigidBody::Static, Collider::cuboid(1.0, 0.8, 1.0),
         Friction::new(0.3), rl.clone(),
@@ -1199,6 +1252,7 @@ pub fn spawn_world_model(
     let boulder_lg = meshes.add(Cuboid::new(3.0, 1.4, 2.5));
     commands.spawn((
         Mesh3d(boulder_lg), MeshMaterial3d(stone_gray.clone()),
+        Position::new(Vec3::new(-10.0, 0.7, -15.0)),
         Transform::from_xyz(-10.0, 0.7, -15.0),
         RigidBody::Static, Collider::cuboid(3.0, 1.4, 2.5),
         Friction::new(0.7), rl.clone(), Name::new("Boulder NW 1"),
@@ -1206,6 +1260,7 @@ pub fn spawn_world_model(
     let boulder_md = meshes.add(Cuboid::new(1.8, 0.8, 1.5));
     commands.spawn((
         Mesh3d(boulder_md.clone()), MeshMaterial3d(stone_gray.clone()),
+        Position::new(Vec3::new(-8.5, 0.4, -13.5)),
         Transform::from_xyz(-8.5, 0.4, -13.5),
         RigidBody::Static, Collider::cuboid(1.8, 0.8, 1.5),
         Friction::new(0.7), rl.clone(),
@@ -1213,6 +1268,7 @@ pub fn spawn_world_model(
     let boulder_md2 = meshes.add(Cuboid::new(2.0, 1.0, 1.5));
     commands.spawn((
         Mesh3d(boulder_md2), MeshMaterial3d(rock_red.clone()),
+        Position::new(Vec3::new(-11.5, 0.5, -14.0)),
         Transform::from_xyz(-11.5, 0.5, -14.0).with_rotation(Quat::from_rotation_y(0.4)),
         RigidBody::Static, Collider::cuboid(2.0, 1.0, 1.5),
         Friction::new(0.7), rl.clone(),
@@ -1222,6 +1278,7 @@ pub fn spawn_world_model(
     let ridge1 = meshes.add(Cuboid::new(4.0, 1.2, 1.5));
     commands.spawn((
         Mesh3d(ridge1), MeshMaterial3d(stone_dark.clone()),
+        Position::new(Vec3::new(12.0, 0.6, -16.0)),
         Transform::from_xyz(12.0, 0.6, -16.0).with_rotation(Quat::from_rotation_y(0.3)),
         RigidBody::Static, Collider::cuboid(4.0, 1.2, 1.5),
         Friction::new(0.7), rl.clone(), Name::new("Ridge NE 1"),
@@ -1229,6 +1286,7 @@ pub fn spawn_world_model(
     let ridge2 = meshes.add(Cuboid::new(2.0, 0.8, 2.0));
     commands.spawn((
         Mesh3d(ridge2), MeshMaterial3d(stone_gray.clone()),
+        Position::new(Vec3::new(14.0, 0.4, -14.0)),
         Transform::from_xyz(14.0, 0.4, -14.0),
         RigidBody::Static, Collider::cuboid(2.0, 0.8, 2.0),
         Friction::new(0.7), rl.clone(),
@@ -1236,6 +1294,7 @@ pub fn spawn_world_model(
     let ridge3 = meshes.add(Cuboid::new(2.5, 0.6, 1.5));
     commands.spawn((
         Mesh3d(ridge3), MeshMaterial3d(stone_dark.clone()),
+        Position::new(Vec3::new(10.0, 0.3, -18.0)),
         Transform::from_xyz(10.0, 0.3, -18.0).with_rotation(Quat::from_rotation_y(-0.2)),
         RigidBody::Static, Collider::cuboid(2.5, 0.6, 1.5),
         Friction::new(0.7), rl.clone(),
@@ -1245,6 +1304,7 @@ pub fn spawn_world_model(
     let cover1 = meshes.add(Cuboid::new(1.8, 0.9, 1.2));
     commands.spawn((
         Mesh3d(cover1), MeshMaterial3d(stone_gray.clone()),
+        Position::new(Vec3::new(7.0, 0.45, -5.0)),
         Transform::from_xyz(7.0, 0.45, -5.0).with_rotation(Quat::from_rotation_y(0.7)),
         RigidBody::Static, Collider::cuboid(1.8, 0.9, 1.2),
         Friction::new(0.7), rl.clone(),
@@ -1252,6 +1312,7 @@ pub fn spawn_world_model(
     let cover2 = meshes.add(Cuboid::new(1.5, 0.7, 1.5));
     commands.spawn((
         Mesh3d(cover2), MeshMaterial3d(rock_red.clone()),
+        Position::new(Vec3::new(-6.0, 0.35, -8.0)),
         Transform::from_xyz(-6.0, 0.35, -8.0),
         RigidBody::Static, Collider::cuboid(1.5, 0.7, 1.5),
         Friction::new(0.7), rl.clone(),
@@ -1259,6 +1320,7 @@ pub fn spawn_world_model(
     let cover3 = meshes.add(Cuboid::new(2.0, 0.6, 1.0));
     commands.spawn((
         Mesh3d(cover3), MeshMaterial3d(stone_dark.clone()),
+        Position::new(Vec3::new(3.0, 0.3, -20.0)),
         Transform::from_xyz(3.0, 0.3, -20.0).with_rotation(Quat::from_rotation_y(1.1)),
         RigidBody::Static, Collider::cuboid(2.0, 0.6, 1.0),
         Friction::new(0.7), rl.clone(),
@@ -1277,6 +1339,8 @@ pub fn spawn_world_model(
         let m = meshes.add(Cuboid::new(size.x, size.y, size.z));
         commands.spawn((
             Mesh3d(m), MeshMaterial3d(log_wood.clone()),
+            Position::new(pos),
+            Rotation(Quat::from_rotation_y(rot_y)),
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(rot_y)),
             RigidBody::Static, Collider::cuboid(size.x, size.y, size.z),
             Friction::new(0.4), rl.clone(),
@@ -1311,6 +1375,7 @@ pub fn spawn_world_model(
         // Trunk
         commands.spawn((
             Mesh3d(trunk_mesh.clone()), MeshMaterial3d(pine_bark.clone()),
+            Position::new(Vec3::new(base_pos.x, trunk_y, base_pos.z)),
             Transform::from_xyz(base_pos.x, trunk_y, base_pos.z),
             RigidBody::Static, Collider::cuboid(0.6, 4.0, 0.6),
             Friction::new(0.3), rl.clone(),
@@ -1342,6 +1407,7 @@ pub fn spawn_world_model(
     for (x, z) in [(-9.0, -6.0), (-9.0, -9.0), (-6.0, -6.0), (-6.0, -9.0)] {
         commands.spawn((
             Mesh3d(post_mesh.clone()), MeshMaterial3d(log_wood.clone()),
+            Position::new(Vec3::new(x, 2.0, z)),
             Transform::from_xyz(x, 2.0, z),
             RigidBody::Static, Collider::cuboid(0.3, 4.0, 0.3),
             Friction::new(0.3), rl.clone(),
@@ -1350,6 +1416,7 @@ pub fn spawn_world_model(
     // Platform
     commands.spawn((
         Mesh3d(tower_platform), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(-7.5, 3.8, -7.5)),
         Transform::from_xyz(-7.5, 3.8, -7.5),
         RigidBody::Static, Collider::cuboid(4.0, 0.2, 4.0),
         Friction::new(0.3), rl.clone(),
@@ -1358,6 +1425,7 @@ pub fn spawn_world_model(
     // Ladder
     commands.spawn((
         Mesh3d(ladder_mesh), MeshMaterial3d(aged_wood.clone()),
+        Position::new(Vec3::new(-5.5, 1.9, -7.5)),
         Transform::from_xyz(-5.5, 1.9, -7.5).with_rotation(Quat::from_rotation_z(0.5)),
         RigidBody::Static, Collider::cuboid(0.5, 0.15, 1.0),
         Friction::new(0.4), rl.clone(),
@@ -1367,18 +1435,21 @@ pub fn spawn_world_model(
     // Half-walls (cover on watchtower)
     commands.spawn((
         Mesh3d(tower_wall.clone()), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(-9.2, 4.4, -7.5)),
         Transform::from_xyz(-9.2, 4.4, -7.5),
         RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
         Friction::new(0.2), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(tower_wall.clone()), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(-5.8, 4.4, -7.5)),
         Transform::from_xyz(-5.8, 4.4, -7.5),
         RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
         Friction::new(0.2), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(tower_wall_short), MeshMaterial3d(plank_wood.clone()),
+        Position::new(Vec3::new(-7.5, 4.4, -9.2)),
         Transform::from_xyz(-7.5, 4.4, -9.2)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.15, 1.0, 4.0),
@@ -1395,6 +1466,7 @@ pub fn spawn_world_model(
 
     commands.spawn((
         Mesh3d(truck_body), MeshMaterial3d(rusted_metal.clone()),
+        Position::new(Vec3::new(10.0, 0.6, 3.0)),
         Transform::from_xyz(10.0, 0.6, 3.0).with_rotation(rot_truck),
         RigidBody::Static, Collider::cuboid(2.5, 1.2, 5.0),
         Friction::new(0.3), rl.clone(),
@@ -1402,6 +1474,7 @@ pub fn spawn_world_model(
     ));
     commands.spawn((
         Mesh3d(truck_cab), MeshMaterial3d(rusted_metal.clone()),
+        Position::new(Vec3::new(10.0, 1.5, 1.5)),
         Transform::from_xyz(10.0, 1.5, 1.5).with_rotation(rot_truck),
         RigidBody::Static, Collider::cuboid(2.3, 1.0, 2.5),
         Friction::new(0.3), rl.clone(),
@@ -1421,6 +1494,7 @@ pub fn spawn_world_model(
         let z = ring_center.z + angle.sin() * r;
         commands.spawn((
             Mesh3d(fire_stone.clone()), MeshMaterial3d(stone_dark.clone()),
+            Position::new(Vec3::new(x, 0.15, z)),
             Transform::from_xyz(x, 0.15, z),
             RigidBody::Static, Collider::cuboid(0.4, 0.3, 0.4),
             Friction::new(0.7), rl.clone(),
@@ -1440,18 +1514,21 @@ pub fn spawn_world_model(
     let log_seat = meshes.add(Cuboid::new(0.3, 0.3, 1.8));
     commands.spawn((
         Mesh3d(log_seat.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(1.0, 0.2, 10.0)),
         Transform::from_xyz(1.0, 0.2, 10.0),
         RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
         Friction::new(0.4), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(log_seat.clone()), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(5.0, 0.2, 10.0)),
         Transform::from_xyz(5.0, 0.2, 10.0),
         RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
         Friction::new(0.4), rl.clone(),
     ));
     commands.spawn((
         Mesh3d(log_seat), MeshMaterial3d(log_wood.clone()),
+        Position::new(Vec3::new(3.0, 0.2, 12.0)),
         Transform::from_xyz(3.0, 0.2, 12.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
         RigidBody::Static, Collider::cuboid(0.3, 0.3, 1.8),
@@ -1612,6 +1689,8 @@ pub fn init_replicated_doors(
         commands.entity(entity).insert((
             Mesh3d(door_mesh),
             MeshMaterial3d(wood),
+            Position::new(pos.0),
+            Rotation(rot.0),
             Transform::from_translation(pos.0).with_rotation(rot.0),
             Visibility::default(),
             Collider::cuboid(2.5, 2.8, 0.3),
@@ -1828,10 +1907,10 @@ pub fn shared_equip_interact_system(
         let mut closest: Option<(Entity, f32, String)> = None;
         for (entity, eq_pos, equippable) in equippable_query.iter() {
             let dist = player_pos.0.distance(eq_pos.0);
-            if dist <= equippable.interaction_distance {
-                if closest.as_ref().is_none_or(|(_, d, _)| dist < *d) {
-                    closest = Some((entity, dist, equippable.name.clone()));
-                }
+            if dist <= equippable.interaction_distance
+                && closest.as_ref().is_none_or(|(_, d, _)| dist < *d)
+            {
+                closest = Some((entity, dist, equippable.name.clone()));
             }
         }
 
@@ -1957,7 +2036,7 @@ pub fn shared_primary_action_system(
                 .iter()
                 .find(|e| e.name == *name)
                 .and_then(|e| e.muzzle_offset)
-                .map(|o| Vec3::from_array(o))
+                .map(Vec3::from_array)
                 .unwrap_or(Vec3::new(0.2, -0.1, -0.9));
 
             let cam_rot = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0);

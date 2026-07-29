@@ -13,6 +13,47 @@ pub const PROTOCOL_ID: u64 = 7;
 pub const SERVER_PORT: u16 = 5000;
 pub const FIXED_TIMESTEP_HZ: f64 = 64.0;
 
+/// Locate the absolute path to the `assets/` directory at runtime.
+///
+/// Pass the returned string to `AssetPlugin { file_path, .. }` so Bevy's
+/// asset server reads from the right place regardless of how the binary was
+/// launched.
+///
+/// Search order (first match wins):
+/// 1. `BEVY_ASSET_ROOT` env var → explicit user/bundle override
+/// 2. CWD-relative `./assets/` (`cargo run`, systemd WorkingDirectory, etc.)
+/// 3. `<exe_dir>/assets/` (production install layout)
+/// 4. `<exe_dir>/../Resources/assets/` (macOS `.app` bundle layout)
+/// 5. `CARGO_MANIFEST_DIR/assets/` baked at compile time (dev fallback)
+pub fn asset_root_path() -> String {
+    let ok = |p: std::path::PathBuf| {
+        if p.is_dir() { Some(p.to_string_lossy().into_owned()) } else { None }
+    };
+
+    if let Ok(root) = std::env::var("BEVY_ASSET_ROOT") {
+        if let Some(p) = ok(std::path::PathBuf::from(&root).join("assets"))
+            .or_else(|| ok(std::path::PathBuf::from(&root)))
+        {
+            return p;
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(p) = ok(cwd.join("assets")) { return p; }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if let Some(p) = ok(exe_dir.join("assets")) { return p; }
+            if let Some(contents) = exe_dir.parent() {
+                if let Some(p) = ok(contents.join("Resources").join("assets")) { return p; }
+            }
+        }
+    }
+    if let Some(p) = ok(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")) {
+        return p;
+    }
+    "assets".to_string()
+}
+
 /// Shared plugin added by both client and server:
 /// registers protocol, physics, frame interpolation, and shared movement.
 pub struct SharedPlugin;

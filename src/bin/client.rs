@@ -74,18 +74,29 @@ fn main() {
         env!("ANIMA_BUILD_DATE"),
     );
 
+    // Asset root — works for cargo run, raw binary, .app bundle.
+    let asset_path = multiplayer::asset_root_path();
+    eprintln!("Assets: {asset_path}");
+
     // Load or generate persistent Ed25519 keypair (~/.anima/keypair.json)
     let identity = multiplayer::auth::ClientIdentity::load_or_create();
     info!("Client identity: {} (id={})", identity.address, identity.client_id);
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: asset_path,
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("ANIMA {} — {}", env!("ANIMA_VERSION"), &identity.address[..8]),
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
     .insert_resource(ClearColor(Color::BLACK));
     app.insert_resource(identity);
     app.add_plugins(EguiPlugin::default());
@@ -271,6 +282,7 @@ fn setup_egui_fonts(mut contexts: EguiContexts, mut commands: Commands) {
 // ========================================
 
 /// Cinzel font ID at the given size (regular weight).
+#[allow(dead_code)]
 fn cinzel(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("cinzel".into()))
 }
@@ -291,11 +303,13 @@ fn chakra(size: f32) -> egui::FontId {
 }
 
 /// Chakra Petch SemiBold font ID at the given size.
+#[allow(dead_code)]
 fn chakra_semi(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("chakra_semi".into()))
 }
 
 /// Chakra Petch Bold font ID at the given size.
+#[allow(dead_code)]
 fn chakra_bold(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("chakra_bold".into()))
 }
@@ -355,7 +369,7 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
         painter.line_segment(
             [start, end],
             egui::Stroke::new(
-                0.5,
+                0.5_f32,
                 egui::Color32::from_rgba_unmultiplied(GEO_COLOR_BASE[0], GEO_COLOR_BASE[1], GEO_COLOR_BASE[2], alpha as u8),
             ),
         );
@@ -370,7 +384,7 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
             center,
             radius,
             egui::Stroke::new(
-                0.5,
+                0.5_f32,
                 egui::Color32::from_rgba_unmultiplied(GEO_COLOR_BASE[0], GEO_COLOR_BASE[1], GEO_COLOR_BASE[2], alpha as u8),
             ),
         );
@@ -384,7 +398,7 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
             egui::pos2(rect.right(), scan_y),
         ],
         egui::Stroke::new(
-            0.3,
+            0.3_f32,
             egui::Color32::from_rgba_unmultiplied(80, 90, 140, 12),
         ),
     );
@@ -394,7 +408,7 @@ fn draw_geometric_background_at(painter: &egui::Painter, rect: egui::Rect, cente
     let margin = 40.0;
     let corner_alpha = ((t * 0.3).sin() * 0.5 + 0.5) * 35.0;
     let corner_color = egui::Color32::from_rgba_unmultiplied(GEO_COLOR_BASE[0], GEO_COLOR_BASE[1], GEO_COLOR_BASE[2], corner_alpha as u8);
-    let stroke = egui::Stroke::new(1.0, corner_color);
+    let stroke = egui::Stroke::new(1.0_f32, corner_color);
 
     // Top-left
     painter.line_segment([egui::pos2(rect.left() + margin, rect.top() + margin), egui::pos2(rect.left() + margin + corner_len, rect.top() + margin)], stroke);
@@ -556,7 +570,7 @@ fn menu_ui(
             ui.painter().text(
                 egui::pos2(rect.right() - 20.0, rect.bottom() - 20.0),
                 egui::Align2::RIGHT_BOTTOM,
-                &format!("v{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_SHORT_HASH")),
+                format!("v{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_SHORT_HASH")),
                 chakra(11.0),
                 cream(0.2),
             );
@@ -622,7 +636,7 @@ fn menu_ui(
             while scan_y < rect.bottom() {
                 ui.painter().line_segment(
                     [egui::pos2(rect.left(), scan_y), egui::pos2(rect.right(), scan_y)],
-                    egui::Stroke::new(1.0, scanline_color),
+                    egui::Stroke::new(1.0_f32, scanline_color),
                 );
                 scan_y += 3.0;
             }
@@ -748,9 +762,8 @@ fn resolve_server_addr() -> SocketAddr {
     }
     // Hostname → first IPv4 result
     match (host.as_str(), SERVER_PORT).to_socket_addrs() {
-        Ok(addrs) => addrs
-            .filter(|a| a.is_ipv4())
-            .next()
+        Ok(mut addrs) => addrs
+            .find(|a| a.is_ipv4())
             .unwrap_or_else(|| SocketAddr::new(FALLBACK_IP.into(), SERVER_PORT)),
         Err(e) => {
             warn!("DNS lookup for {host} failed ({e}), using fallback IP");
@@ -859,7 +872,7 @@ fn health_hud(
     let Ok(health) = player_query.single() else { return; };
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let bar_w = 200.0;
     let bar_h = 16.0;
     let bar_x = (screen.width() - bar_w) / 2.0;
@@ -896,7 +909,7 @@ fn health_hud(
             );
             ui.painter().rect_filled(fill_rect, 4.0, color);
             // Border
-            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(80)), egui::StrokeKind::Outside);
+            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(80)), egui::StrokeKind::Outside);
             // Text
             ui.painter().text(
                 rect.center(),
@@ -920,10 +933,10 @@ fn crosshair_hud(
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return; };
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let center = egui::pos2(screen.width() / 2.0, screen.height() / 2.0);
     let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180);
-    let stroke = egui::Stroke::new(1.5, color);
+    let stroke = egui::Stroke::new(1.5_f32, color);
     let size = 8.0;
     let gap = 3.0;
 
@@ -958,7 +971,7 @@ fn inventory_hud(
         return;
     }
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     egui::Area::new(egui::Id::new("inventory_hud"))
         .fixed_pos(egui::pos2(16.0, screen.height() - 140.0))
@@ -1011,7 +1024,7 @@ fn inventory_hud(
 /// Version from Cargo.toml + short git commit hash baked in at compile time.
 fn build_version_hud(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else { return; };
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"), "-", env!("GIT_SHORT_HASH"));
 
@@ -1055,7 +1068,7 @@ fn death_screen(
 
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("death_overlay")));
 
     // Dark red overlay
@@ -1097,7 +1110,7 @@ fn kill_feed_ui(
     let Ok(ctx) = contexts.ctx_mut() else { return; };
 
     let now = time.elapsed_secs();
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
 
     // Collect recent kills (within KILL_FEED_DURATION seconds)
     let mut entries: Vec<&multiplayer::protocol::KillFeedEntry> = feed_query
