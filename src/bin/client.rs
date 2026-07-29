@@ -802,6 +802,12 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
             PeerAddr(server_addr),
             ReplicationReceiver::default(),
             PredictionManager::default(),
+            // Valorant-style adaptive input buffering: cover up to ~3 ticks (~47ms
+            // at 64Hz) of latency with input delay so the server almost always has
+            // the client's REAL input when it simulates a tick — mispredictions at
+            // sharp input transitions (jump press, strafe start) mostly vanish.
+            // Latency beyond that is covered by prediction/rollback as before.
+            InputTimelineConfig::new(SyncConfig::default(), InputDelayConfig::balanced()),
             ReplicationSender::new(
                 Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
                 SendUpdatesMode::SinceLastAck,

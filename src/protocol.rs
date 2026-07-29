@@ -202,14 +202,20 @@ impl Plugin for ProtocolPlugin {
         // threshold + smooth correction. Threshold is generous (0.1 rad ~5.7°) because
         // client and server run the same shared_look with the same input deltas, so
         // divergence is minimal. Correction smoothing makes any correction invisible.
+        // Look is effectively CLIENT-AUTHORITATIVE (CS/Valorant model: the server
+        // accepts view angles from the client's input verbatim and never disputes
+        // them). A violent flick moves yaw >0.1 rad in a single tick, so any
+        // 1-tick input timing offset would trigger a rollback storm while flicking.
+        // We never rollback on look — sub-threshold drift is smoothed by correction,
+        // and Position (the gameplay-relevant state) remains the rollback trigger.
         app.register_component::<PlayerYaw>()
             .add_prediction()
-            .add_should_rollback(|a: &PlayerYaw, b: &PlayerYaw| (a.0 - b.0).abs() >= 0.1)
+            .add_should_rollback(|_: &PlayerYaw, _: &PlayerYaw| false)
             .add_linear_interpolation()
             .enable_correction();
         app.register_component::<PlayerPitch>()
             .add_prediction()
-            .add_should_rollback(|a: &PlayerPitch, b: &PlayerPitch| (a.0 - b.0).abs() >= 0.1)
+            .add_should_rollback(|_: &PlayerPitch, _: &PlayerPitch| false)
             .add_linear_interpolation()
             .enable_correction();
         app.register_component::<PlayerEquipped>()
@@ -279,13 +285,26 @@ impl Plugin for ProtocolPlugin {
 // When server and client drift under threshold, `enable_correction()` smooths
 // the drift into Transform over a few frames — invisible to the player.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
-    (this.0 - that.0).length() >= 3.0 // 3 meters — exceed 2m jump peak
+    let err = (this.0 - that.0).length();
+    if err >= 3.0 {
+        // 3 meters — exceed 2m jump peak. Log so playtests can attribute snaps.
+        bevy::log::info!("[ROLLBACK] Position error {err:.2}m (client {:?} vs server {:?})", this.0, that.0);
+        return true;
+    }
+    false
 }
 
 fn rotation_should_rollback(this: &Rotation, that: &Rotation) -> bool {
     this.angle_between(*that) >= 0.2 // ~11°
 }
 
+// Velocity NEVER triggers rollback on its own. A jump press changes velocity by
+// 10 m/s and a strafe start by 7 m/s within a single tick, so any threshold below
+// that guarantees a rollback on every sharp input transition if input timing is
+// off by even one tick (the "rapid desync while jumping/strafing" symptom).
+// Velocity still gets corrected whenever a Position rollback fires — position is
+// the gameplay truth; velocity is derived from inputs.
 fn velocity_should_rollback(this: &CharacterVelocity, that: &CharacterVelocity) -> bool {
-    (this.0 - that.0).length() >= 5.0 // 5 m/s — barely ever rollback on velocity
+    let _ = (this, that);
+    false
 }
