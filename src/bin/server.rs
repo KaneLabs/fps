@@ -633,3 +633,175 @@ fn log_input_lag(
         *ticks = 0;
     }
 }
+
+// ========================================
+// Headless integration tests: death → respawn gate
+// ========================================
+//
+// These prove the pay-to-spawn flow server-side with no networking, no
+// physics, and no renderer. Time is advanced manually for determinism.
+// They pin down CURRENT behavior — including the fact that payment mode
+// with a verified wallet authorizes without any on-chain check (the stub).
+// When the devnet RPC gate lands, the baseline test below must be updated.
+#[cfg(test)]
+mod respawn_gate_tests {
+    use super::*;
+    use avian3d::prelude::Rotation;
+    use multiplayer::solana::RespawnConfig;
+
+    fn paid_config() -> RespawnConfig {
+        RespawnConfig {
+            require_payment: true,
+            ..RespawnConfig::default()
+        }
+    }
+
+    /// Headless app with only the death/respawn systems and their resources.
+    fn gate_app(config: RespawnConfig) -> App {
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.init_resource::<PendingRespawns>();
+        app.init_resource::<VerifiedWallets>();
+        app.insert_resource(config);
+        app.add_systems(Update, (kill_plane, check_player_death, process_respawns).chain());
+        app
+    }
+
+    /// Spawn a living player with the full component set the death/respawn
+    /// systems query for.
+    fn spawn_player(app: &mut App, client_id: u64) -> Entity {
+        app.world_mut()
+            .spawn((
+                PlayerId(client_id),
+                PlayerDisplayId(client_id as u32),
+                LastDamagedBy(0),
+                PlayerHealth(100),
+                Position(Vec3::new(0.0, 1.0, 0.0)),
+                Rotation(Quat::IDENTITY),
+                PlayerEquipped(None),
+                PlayerInventory::default(),
+            ))
+            .id()
+    }
+
+    fn advance(app: &mut App, secs: f32) {
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(std::time::Duration::from_secs_f32(secs));
+        app.update();
+    }
+
+    fn is_dead(app: &App, e: Entity) -> bool {
+        app.world().entity(e).contains::<PlayerDead>()
+    }
+
+    fn health(app: &App, e: Entity) -> i32 {
+        app.world().entity(e).get::<PlayerHealth>().unwrap().0
+    }
+
+    fn kill(app: &mut App, e: Entity) {
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<PlayerHealth>()
+            .unwrap()
+            .0 = 0;
+    }
+
+    // ---- Dev mode (default): free respawns ----
+
+    #[test]
+    fn dev_mode_full_death_to_respawn_loop() {
+        let mut app = gate_app(RespawnConfig::default());
+        let e = spawn_player(&mut app, 1);
+
+        // Give the player loot so death has something to drop.
+        {
+            let mut em = app.world_mut().entity_mut(e);
+            em.get_mut::<PlayerEquipped>().unwrap().0 = Some("ak47".into());
+            em.get_mut::<PlayerInventory>().unwrap().items.push("pickaxe".into());
+        }
+
+        kill(&mut app, e);
+        advance(&mut app, 0.0);
+
+        // Death processed: marked dead, loot stripped, respawn queued.
+        assert!(is_dead(&app, e), "health 0 must mark PlayerDead");
+        assert_eq!(app.world().entity(e).get::<PlayerEquipped>().unwrap().0, None);
+        assert!(app.world().entity(e).get::<PlayerInventory>().unwrap().items.is_empty());
+        assert_eq!(app.world().resource::<PendingRespawns>().timers.len(), 1);
+
+        // Before the delay elapses: still dead.
+        advance(&mut app, RESPAWN_DELAY - 0.5);
+        assert!(is_dead(&app, e), "must stay dead before RESPAWN_DELAY elapses");
+        assert_eq!(health(&app, e), 0);
+
+        // After the delay: alive, restored, timer consumed.
+        advance(&mut app, 1.0);
+        assert!(!is_dead(&app, e), "must respawn after RESPAWN_DELAY in dev mode");
+        assert_eq!(health(&app, e), 100);
+        assert_eq!(app.world().entity(e).get::<Rotation>().unwrap().0, Quat::IDENTITY);
+        assert!(app.world().resource::<PendingRespawns>().timers.is_empty());
+    }
+
+    #[test]
+    fn kill_plane_triggers_death() {
+        let mut app = gate_app(RespawnConfig::default());
+        let e = spawn_player(&mut app, 1);
+
+        app.world_mut().entity_mut(e).get_mut::<Position>().unwrap().0.y = KILL_PLANE_Y - 1.0;
+        advance(&mut app, 0.0);
+
+        assert!(is_dead(&app, e), "falling below the kill plane must kill");
+        assert_eq!(health(&app, e), 0);
+    }
+
+    // ---- Payment mode: the pay-to-spawn gate ----
+
+    #[test]
+    fn payment_mode_unverified_wallet_stays_dead_and_requeues() {
+        let mut app = gate_app(paid_config());
+        let e = spawn_player(&mut app, 7);
+        kill(&mut app, e);
+        advance(&mut app, 0.0);
+
+        advance(&mut app, RESPAWN_DELAY + 0.1);
+        assert!(is_dead(&app, e), "unverified wallet must not respawn in payment mode");
+        assert_eq!(
+            app.world().resource::<PendingRespawns>().timers.len(),
+            1,
+            "denied respawn must re-queue for retry"
+        );
+
+        // Still dead across multiple retry windows.
+        advance(&mut app, 30.0);
+        assert!(is_dead(&app, e));
+        assert_eq!(app.world().resource::<PendingRespawns>().timers.len(), 1);
+    }
+
+    #[test]
+    fn payment_mode_wallet_verified_while_dead_respawns_on_retry() {
+        let mut app = gate_app(paid_config());
+        let e = spawn_player(&mut app, 7);
+        kill(&mut app, e);
+        advance(&mut app, 0.0);
+
+        // First expiry: denied (wallet not verified), re-queued at +5s.
+        advance(&mut app, RESPAWN_DELAY + 0.1);
+        assert!(is_dead(&app, e));
+
+        // Wallet auth completes while the player is dead.
+        app.world_mut()
+            .resource_mut::<VerifiedWallets>()
+            .wallets
+            .insert(7, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string());
+
+        // Next retry window: authorized.
+        // BASELINE / STUB DOCUMENTATION: this respawn happens with NO on-chain
+        // payment — check_respawn_authorization does not touch Solana yet.
+        // When the devnet RPC gate lands, this test must gain a funded-wallet
+        // fixture and an InsufficientFunds counterpart.
+        advance(&mut app, 5.1);
+        assert!(!is_dead(&app, e), "verified wallet must respawn on retry");
+        assert_eq!(health(&app, e), 100);
+    }
+}
