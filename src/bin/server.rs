@@ -799,6 +799,22 @@ mod respawn_gate_tests {
         }
     }
 
+    /// MockChain behind a latch: `get_balance` blocks while the test holds
+    /// the latch guard. Makes the in-flight `PendingChainCheck` state
+    /// deterministic — without it, the instant mock can reply before the
+    /// same-tick `poll_chain_checks`, and asserts on the transient state race.
+    struct LatchedChain {
+        inner: MockChain,
+        gate: Arc<Mutex<()>>,
+    }
+
+    impl BalanceProvider for LatchedChain {
+        fn get_balance(&self, address: &str) -> Result<u64, String> {
+            let _open = self.gate.lock().unwrap();
+            self.inner.get_balance(address)
+        }
+    }
+
     /// Provider that fails every request — simulates an RPC outage.
     struct DeadRpc;
     impl BalanceProvider for DeadRpc {
@@ -973,9 +989,16 @@ mod respawn_gate_tests {
         let chain = MockChain::default();
         let config = paid_config();
         chain.set_balance(WALLET, config.respawn_cost_lamports);
-        let mut app = gate_app_with(config, Arc::new(chain));
+        let gate = Arc::new(Mutex::new(()));
+        let mut app = gate_app_with(
+            config,
+            Arc::new(LatchedChain { inner: chain, gate: gate.clone() }),
+        );
         let e = spawn_player(&mut app, 7);
         verify_wallet(&mut app, 7, WALLET);
+
+        // Hold the latch: the chain check stays in flight until we release it.
+        let hold = gate.lock().unwrap();
 
         kill(&mut app, e);
         advance(&mut app, 0.0);
@@ -988,6 +1011,7 @@ mod respawn_gate_tests {
         );
         assert!(is_dead(&app, e), "must stay dead until the chain check resolves");
 
+        drop(hold);
         settle_chain_check(&mut app, e);
         assert!(!is_dead(&app, e), "funded wallet must respawn once the chain confirms");
         assert_eq!(health(&app, e), 100);
