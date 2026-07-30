@@ -174,10 +174,20 @@ impl Default for RespawnConfig {
     }
 }
 
-/// Parse --require-respawn-payment from CLI args.
+/// Parse respawn-payment config from env vars and CLI args.
+/// Precedence: CLI flag > env var > default.
+/// Env vars: ANIMA_RPC_URL, ANIMA_TREASURY.
 pub fn parse_respawn_config() -> RespawnConfig {
     let args: Vec<String> = std::env::args().collect();
     let mut config = RespawnConfig::default();
+
+    // Env fallbacks (overridden by CLI flags below)
+    if let Ok(url) = std::env::var("ANIMA_RPC_URL") {
+        config.rpc_url = url;
+    }
+    if let Ok(addr) = std::env::var("ANIMA_TREASURY") {
+        config.treasury_address = addr;
+    }
 
     if args.contains(&"--require-respawn-payment".to_string()) {
         config.require_payment = true;
@@ -200,30 +210,31 @@ pub fn parse_respawn_config() -> RespawnConfig {
     config
 }
 
-/// Result of a respawn authorization check.
+/// Result of the synchronous (in-tick) respawn authorization decision.
+///
+/// The sync decision never touches the network. When on-chain state must be
+/// consulted, it returns `RequiresChainCheck` and the server spawns an async
+/// balance check (see `spawn_balance_check`) whose `ChainCheckResult` makes
+/// the final call. FixedUpdate is never blocked on RPC.
 #[derive(Debug)]
 pub enum RespawnAuth {
-    /// Respawn authorized (free mode or payment confirmed)
+    /// Respawn authorized (free dev mode).
     Authorized,
-    /// Respawn denied — insufficient funds
-    InsufficientFunds {
-        required_lamports: u64,
-        available_lamports: u64,
-    },
-    /// Respawn denied — wallet not verified
+    /// Respawn denied — wallet not verified.
     WalletNotVerified,
+    /// Payment mode + verified wallet: on-chain balance must be checked
+    /// asynchronously before authorizing.
+    RequiresChainCheck {
+        /// The verified wallet address (base58) to check.
+        wallet: String,
+    },
 }
 
-/// Check if a player is authorized to respawn.
+/// Synchronous part of the respawn authorization decision.
 ///
-/// Current implementation:
-/// - If `require_payment` is false → always authorized (dev mode)
-/// - If `require_payment` is true → check if wallet is verified
-///
-/// Future implementation (when Solana RPC is wired):
-/// 1. Check ANIMA_RESPAWN token balance → burn 1 if available
-/// 2. Check SOL balance → transfer respawn_cost_lamports to treasury
-/// 3. Deny if neither condition met
+/// - `require_payment` false → always authorized (dev mode)
+/// - wallet not verified → denied
+/// - otherwise → the caller must run the async on-chain check
 pub fn check_respawn_authorization(
     config: &RespawnConfig,
     client_id: u64,
@@ -239,36 +250,292 @@ pub fn check_respawn_authorization(
         return RespawnAuth::WalletNotVerified;
     }
 
-    // TODO: Solana RPC balance check
-    //
-    // Future flow:
-    // 1. let wallet_address = verified_wallets.get_address(client_id).unwrap();
-    // 2. let rpc_client = solana_client::rpc_client::RpcClient::new(&config.rpc_url);
-    //
-    // Check RESPAWN token:
-    // 3. let respawn_mint = Pubkey::from_str("ANIMA_RESPAWN_MINT_ADDRESS")?;
-    // 4. let ata = get_associated_token_address(&wallet_pubkey, &respawn_mint);
-    // 5. let balance = rpc_client.get_token_account_balance(&ata)?;
-    // 6. if balance.amount > 0 {
-    //        // Burn 1 respawn token
-    //        let ix = spl_token::instruction::burn(...);
-    //        // Submit transaction
-    //        return RespawnAuth::Authorized;
-    //    }
-    //
-    // Check SOL balance:
-    // 7. let sol_balance = rpc_client.get_balance(&wallet_pubkey)?;
-    // 8. if sol_balance >= config.respawn_cost_lamports {
-    //        // Transfer to treasury
-    //        let ix = system_instruction::transfer(...);
-    //        return RespawnAuth::Authorized;
-    //    }
-    //
-    // 9. return RespawnAuth::InsufficientFunds { ... };
+    let wallet = verified_wallets
+        .get_address(client_id)
+        .expect("is_verified checked above")
+        .to_string();
+    RespawnAuth::RequiresChainCheck { wallet }
+}
 
-    // For now: if wallet is verified, authorize
-    // This is the hook point — swap this return for real Solana checks
-    RespawnAuth::Authorized
+// ========================================
+// On-chain verification (server-as-verifier)
+// ========================================
+//
+// Architecture decision (CEO-approved): the game server NEVER signs
+// transactions. Clients pay with their own wallets; the server only VERIFIES
+// on-chain state via thin JSON-RPC calls (getBalance now,
+// getSignatureStatuses when payment verification lands). This keeps the
+// heavy solana-sdk dependency tree out of the game entirely.
+//
+// Phase A (current): respawn requires the verified wallet to hold at least
+// `respawn_cost_lamports` on the configured cluster (devnet in staging).
+// Phase B (next): verify an actual client-signed payment to the treasury.
+
+/// Source of on-chain balance data. Abstracted so the respawn gate is
+/// testable headless with a mock, while production uses JSON-RPC.
+pub trait BalanceProvider: Send + Sync + 'static {
+    /// Return the lamport balance of `address`, or an error string.
+    fn get_balance(&self, address: &str) -> Result<u64, String>;
+}
+
+/// Production provider: Solana JSON-RPC `getBalance` over HTTP.
+/// Uses a blocking reqwest client — always called from a worker thread
+/// (see `spawn_balance_check`), never from the game loop.
+pub struct JsonRpcBalanceProvider {
+    rpc_url: String,
+    client: reqwest::blocking::Client,
+}
+
+impl JsonRpcBalanceProvider {
+    pub fn new(rpc_url: &str) -> Self {
+        Self {
+            rpc_url: rpc_url.to_string(),
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("failed to build HTTP client"),
+        }
+    }
+}
+
+impl BalanceProvider for JsonRpcBalanceProvider {
+    fn get_balance(&self, address: &str) -> Result<u64, String> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [address, {"commitment": "confirmed"}],
+        });
+        let response: serde_json::Value = self
+            .client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .map_err(|e| format!("rpc request failed: {e}"))?
+            .json()
+            .map_err(|e| format!("rpc response not json: {e}"))?;
+        parse_get_balance_response(&response)
+    }
+}
+
+/// Parse a `getBalance` JSON-RPC response into lamports.
+/// Split out of the provider for direct unit testing.
+pub fn parse_get_balance_response(response: &serde_json::Value) -> Result<u64, String> {
+    if let Some(err) = response.get("error") {
+        return Err(format!("rpc error: {err}"));
+    }
+    response
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("malformed getBalance response: {response}"))
+}
+
+/// Bevy resource wrapping the balance provider used by the respawn gate.
+/// Production inserts `JsonRpcBalanceProvider`; tests insert a mock.
+#[derive(Resource, Clone)]
+pub struct ChainVerifier(pub std::sync::Arc<dyn BalanceProvider>);
+
+impl ChainVerifier {
+    pub fn json_rpc(rpc_url: &str) -> Self {
+        Self(std::sync::Arc::new(JsonRpcBalanceProvider::new(rpc_url)))
+    }
+}
+
+/// Final verdict of an async on-chain check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChainCheckResult {
+    /// Wallet holds at least the required lamports.
+    Funded { available_lamports: u64 },
+    /// Wallet balance is below the required lamports.
+    InsufficientFunds {
+        required_lamports: u64,
+        available_lamports: u64,
+    },
+    /// RPC failed. The gate FAILS CLOSED: the player stays dead and the
+    /// check is retried — an outage must never grant free respawns.
+    RpcError(String),
+}
+
+/// Run a balance check on a worker thread; the receiver completes with the
+/// verdict. The game loop polls with `try_recv` — never blocks.
+pub fn spawn_balance_check(
+    provider: std::sync::Arc<dyn BalanceProvider>,
+    wallet: String,
+    required_lamports: u64,
+) -> std::sync::mpsc::Receiver<ChainCheckResult> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = match provider.get_balance(&wallet) {
+            Ok(available_lamports) if available_lamports >= required_lamports => {
+                ChainCheckResult::Funded { available_lamports }
+            }
+            Ok(available_lamports) => ChainCheckResult::InsufficientFunds {
+                required_lamports,
+                available_lamports,
+            },
+            Err(e) => ChainCheckResult::RpcError(e),
+        };
+        // Receiver may have been dropped (player disconnected) — ignore.
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::VerifiedWallets;
+
+    fn paid_config() -> RespawnConfig {
+        RespawnConfig {
+            require_payment: true,
+            ..RespawnConfig::default()
+        }
+    }
+
+    fn verified(client_id: u64) -> VerifiedWallets {
+        let mut vw = VerifiedWallets::default();
+        vw.wallets
+            .insert(client_id, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string());
+        vw
+    }
+
+    #[test]
+    fn dev_mode_always_authorizes_even_unverified() {
+        let config = RespawnConfig::default();
+        assert!(!config.require_payment, "default config must be free-respawn dev mode");
+        let result = check_respawn_authorization(&config, 42, &VerifiedWallets::default());
+        assert!(matches!(result, RespawnAuth::Authorized));
+    }
+
+    #[test]
+    fn payment_mode_denies_unverified_wallet() {
+        let result = check_respawn_authorization(&paid_config(), 42, &VerifiedWallets::default());
+        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+    }
+
+    #[test]
+    fn payment_mode_denies_other_clients_verification() {
+        // Client 99 is verified; client 42 must not ride on it.
+        let result = check_respawn_authorization(&paid_config(), 42, &verified(99));
+        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+    }
+
+    /// The stub is gone: payment mode + verified wallet no longer authorizes
+    /// blindly — it demands an async on-chain check for the verified wallet.
+    #[test]
+    fn payment_mode_verified_wallet_requires_chain_check() {
+        let result = check_respawn_authorization(&paid_config(), 42, &verified(42));
+        match result {
+            RespawnAuth::RequiresChainCheck { wallet } => {
+                assert_eq!(wallet, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
+            }
+            other => panic!("expected RequiresChainCheck, got {other:?}"),
+        }
+    }
+
+    // ---- Async balance check ----
+
+    struct MockBalances(std::collections::HashMap<String, u64>);
+    impl BalanceProvider for MockBalances {
+        fn get_balance(&self, address: &str) -> Result<u64, String> {
+            self.0
+                .get(address)
+                .copied()
+                .ok_or_else(|| "unknown address".to_string())
+        }
+    }
+
+    fn mock_provider(address: &str, lamports: u64) -> std::sync::Arc<dyn BalanceProvider> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(address.to_string(), lamports);
+        std::sync::Arc::new(MockBalances(m))
+    }
+
+    const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+    fn recv_verdict(rx: std::sync::mpsc::Receiver<ChainCheckResult>) -> ChainCheckResult {
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("balance check thread must complete")
+    }
+
+    #[test]
+    fn balance_check_funded_wallet_is_funded() {
+        let rx = spawn_balance_check(mock_provider(WALLET, 20_000_000), WALLET.into(), 10_000_000);
+        assert_eq!(
+            recv_verdict(rx),
+            ChainCheckResult::Funded { available_lamports: 20_000_000 }
+        );
+    }
+
+    #[test]
+    fn balance_check_exact_balance_is_funded() {
+        let rx = spawn_balance_check(mock_provider(WALLET, 10_000_000), WALLET.into(), 10_000_000);
+        assert_eq!(
+            recv_verdict(rx),
+            ChainCheckResult::Funded { available_lamports: 10_000_000 }
+        );
+    }
+
+    #[test]
+    fn balance_check_underfunded_wallet_is_insufficient() {
+        let rx = spawn_balance_check(mock_provider(WALLET, 9_999_999), WALLET.into(), 10_000_000);
+        assert_eq!(
+            recv_verdict(rx),
+            ChainCheckResult::InsufficientFunds {
+                required_lamports: 10_000_000,
+                available_lamports: 9_999_999,
+            }
+        );
+    }
+
+    #[test]
+    fn balance_check_rpc_failure_fails_closed() {
+        let rx = spawn_balance_check(mock_provider(WALLET, 0), "SomeOtherWallet".into(), 1);
+        assert!(matches!(recv_verdict(rx), ChainCheckResult::RpcError(_)));
+    }
+
+    // ---- getBalance response parsing ----
+
+    #[test]
+    fn parse_get_balance_ok() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"context": {"slot": 12345}, "value": 123456789u64},
+        });
+        assert_eq!(parse_get_balance_response(&response), Ok(123_456_789));
+    }
+
+    #[test]
+    fn parse_get_balance_rpc_error() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32602, "message": "Invalid param: WrongSize"},
+        });
+        assert!(parse_get_balance_response(&response).unwrap_err().contains("rpc error"));
+    }
+
+    #[test]
+    fn parse_get_balance_malformed() {
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": 1});
+        assert!(parse_get_balance_response(&response).unwrap_err().contains("malformed"));
+    }
+
+    /// Live devnet smoke test — ignored by default (network). Run with:
+    /// `cargo test --lib solana -- --ignored`
+    #[test]
+    #[ignore = "hits real devnet RPC"]
+    fn devnet_get_balance_smoke() {
+        let provider = JsonRpcBalanceProvider::new("https://api.devnet.solana.com");
+        // System program account always exists; balance query must succeed.
+        let balance = provider
+            .get_balance("11111111111111111111111111111111")
+            .expect("devnet getBalance must succeed");
+        // The system program account holds a nonzero lamport balance.
+        assert!(balance > 0);
+    }
 }
 
 /// Replicated component: the player's verified Solana wallet address.
