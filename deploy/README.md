@@ -53,11 +53,13 @@ Runs on every PR to `master`:
 ### Architecture
 
 ```
-GitHub Actions (deploy-server job)
+GitHub Actions (deploy-server job — depends only on the server build,
+so server hotfixes ship without waiting for client builds)
     ↓ SCP binary
-    ↓ SSH run deploy script
-Salt Lake City bare metal box
-    /opt/anima/anima-server (systemd-managed)
+    ↓ SSH run deploy script (health-gated: service active + UDP :5000 bound)
+AWS Lightsail: anima-game-1 (us-west-2, static IP 44.235.228.56)
+    /opt/anima/anima-server (systemd-managed, crash-alerting via
+    ExecStopPost log hook + OnFailure unit → /opt/anima/alerts.log)
 ```
 
 ### Initial Server Setup
