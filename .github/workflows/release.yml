@@ -20,6 +20,7 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
       short_sha: ${{ steps.tag.outputs.short_sha }}
       build_date: ${{ steps.tag.outputs.build_date }}
+      commit_epoch: ${{ steps.tag.outputs.commit_epoch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,10 +37,15 @@ jobs:
             TAG="v${VERSION}-${SHORT_SHA}"
           fi
 
+          # Commit timestamp — used by the on-box guard to refuse
+          # out-of-order deploys when two release runs race.
+          COMMIT_EPOCH=$(git log -1 --format=%ct)
+
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "commit_epoch=${COMMIT_EPOCH}" >> "$GITHUB_OUTPUT"
 
           echo "::notice::Release tag: ${TAG} | Version: ${VERSION} | SHA: ${SHORT_SHA}"
 
@@ -396,6 +402,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     environment: production
+    # Serialize deploys: racing release runs must not interleave their
+    # deploy jobs. The on-box epoch guard below is the ordering backstop.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
     steps:
       - name: Download server artifact
         uses: actions/download-artifact@v4
@@ -410,6 +421,11 @@ jobs:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
           DEPLOY_TAG: ${{ needs.version.outputs.tag }}
+          DEPLOY_EPOCH: ${{ needs.version.outputs.commit_epoch }}
+          # Emergency override (intentional rollback to an older commit):
+          # set repo variable DEPLOY_FORCE=1 (Settings → Variables), or
+          # `sudo touch /opt/anima/FORCE_DEPLOY` on the box (one-shot).
+          DEPLOY_FORCE: ${{ vars.DEPLOY_FORCE }}
         run: |
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
@@ -420,11 +436,60 @@ jobs:
 
           scp $SSH_OPTS anima-linux-server.zip "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/anima-linux-server.zip"
 
-          ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" "DEPLOY_TAG=${DEPLOY_TAG}" 'bash -s' << 'DEPLOY_SCRIPT'
+          ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" "DEPLOY_TAG=${DEPLOY_TAG}" "DEPLOY_EPOCH=${DEPLOY_EPOCH}" "DEPLOY_FORCE=${DEPLOY_FORCE:-}" 'bash -s' << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
             INSTALL_DIR="/opt/anima"
             SERVICE_NAME="anima-server"
+            PLAYTEST_FLAG="${INSTALL_DIR}/playtest-live"
+            PLAYTEST_MAX_AGE=10800   # 3h — a forgotten flag must not brick deploys
+
+            # ---- Emergency force override (for intentional rollbacks) ----
+            FORCE=0
+            if [[ "${DEPLOY_FORCE:-}" == "1" ]]; then
+              FORCE=1
+              echo "==> DEPLOY_FORCE=1 (repo variable) — guards bypassed."
+            elif [[ -f "${INSTALL_DIR}/FORCE_DEPLOY" ]]; then
+              FORCE=1
+              sudo rm -f "${INSTALL_DIR}/FORCE_DEPLOY"   # one-shot
+              echo "==> FORCE_DEPLOY flag found on box (consumed) — guards bypassed."
+            fi
+
+            # ---- Playtest gate: never restart the server mid-playtest ----
+            if [[ "${FORCE}" == "0" && -f "${PLAYTEST_FLAG}" ]]; then
+              # Age from file mtime — robust to any file content, and
+              # re-touching the flag renews the 3h expiry window.
+              SET_AT=$(stat -c %Y "${PLAYTEST_FLAG}")
+              AGE=$(( $(date +%s) - SET_AT ))
+              if (( AGE < PLAYTEST_MAX_AGE )); then
+                echo "=============================================================="
+                echo "==> DEPLOY ABORTED: A PLAYTEST IS LIVE."
+                echo "==> Flag: ${PLAYTEST_FLAG} (set $(( AGE / 60 )) min ago)."
+                echo "==> Source of truth: shared note 543fbc05/playtest-live."
+                echo "==> Wait for the playtest to end (ops clears the flag),"
+                echo "==> or re-run this deploy after CEO gives the go."
+                echo "==> Flag auto-expires ${PLAYTEST_MAX_AGE}s after being set."
+                echo "=============================================================="
+                exit 1
+              else
+                echo "==> WARNING: playtest flag is stale ($(( AGE / 3600 ))h old > 3h) — ignoring it. Clearing stale flag."
+                sudo rm -f "${PLAYTEST_FLAG}"
+              fi
+            fi
+
+            # ---- Epoch guard: refuse out-of-order deploys from racing runs ----
+            CUR_EPOCH=$(cat "${INSTALL_DIR}/DEPLOY_EPOCH" 2>/dev/null || echo 0)
+            if [[ "${FORCE}" == "0" ]] && (( DEPLOY_EPOCH < CUR_EPOCH )); then
+              echo "=============================================================="
+              echo "==> DEPLOY REFUSED: candidate commit (epoch ${DEPLOY_EPOCH})"
+              echo "==> is OLDER than the running build (epoch ${CUR_EPOCH})."
+              echo "==> This is an out-of-order race between release runs."
+              echo "==> For an INTENTIONAL rollback: set repo variable"
+              echo "==> DEPLOY_FORCE=1, or 'sudo touch /opt/anima/FORCE_DEPLOY'"
+              echo "==> on the box, then re-run the deploy job."
+              echo "=============================================================="
+              exit 1
+            fi
 
             echo "==> Deploying ${DEPLOY_TAG}..."
             cd /tmp
@@ -439,6 +504,7 @@ jobs:
             sudo mv anima-server ${INSTALL_DIR}/anima-server
             sudo chown root:root ${INSTALL_DIR}/anima-server
             echo "${DEPLOY_TAG}" | sudo tee ${INSTALL_DIR}/VERSION > /dev/null
+            echo "${DEPLOY_EPOCH}" | sudo tee ${INSTALL_DIR}/DEPLOY_EPOCH > /dev/null
 
             echo "==> Starting ${SERVICE_NAME}..."
             sudo systemctl start ${SERVICE_NAME}
