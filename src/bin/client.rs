@@ -189,6 +189,16 @@ fn main() {
         send_wallet_auth.run_if(in_state(AppState::InGame)),
     );
 
+    // Netcode diagnostics: confirmed-tick lag (rollback-abort zone detector).
+    // FixedUpdate so "64 ticks = 1s" holds; gated out of rollback resim so
+    // replayed ticks don't pollute the counters.
+    app.add_systems(
+        FixedUpdate,
+        log_confirmed_lag
+            .run_if(in_state(AppState::InGame))
+            .run_if(not(lightyear::prelude::is_in_rollback)),
+    );
+
     app.add_observer(on_predicted_spawn);
     app.add_observer(on_interpolated_spawn);
     app.add_observer(spawn_tracer);
@@ -885,6 +895,69 @@ fn send_wallet_auth(
 
     // Remove resource — auth sent, don't send again
     commands.remove_resource::<PendingWalletAuth>();
+}
+
+// ========================================
+// Netcode diagnostics
+// ========================================
+
+/// [CONFIRM LAG] — predicted-entity confirmed-tick lag, logged 1/s.
+///
+/// lightyear aborts any rollback further back than max_rollback_ticks (100):
+/// "Trying to do a rollback of N ticks. The max is 100! Aborting"
+/// (lightyear_prediction/src/rollback.rs). An aborted rollback silently DROPS
+/// the server correction: for Full-sync predicted components (Position,
+/// Rotation, CharacterVelocity, yaw/pitch), rollback is the ONLY path that
+/// applies Confirmed<C> onto the predicted entity. So while
+/// `delta = local_tick - ConfirmedTick > 100` ("abort zone"), the client
+/// receives NO server corrections at all.
+///
+/// At connect a burst of abort-zone samples is EXPECTED — initial replication
+/// state arrives 200+ ticks stale, and the "initial rollback [that] will bring
+/// it to the current value" (lightyear_replication replication.rs comment) is
+/// the thing being aborted. It must heal within ~1s as fresh updates advance
+/// ConfirmedTick. If it STAYS in the abort zone, every correction for the rest
+/// of the session is dropped — client and server drift apart with no
+/// rubber-banding and no [ROLLBACK] logs (the "feels broken until reconnect"
+/// hypothesis). This log exists so a playtest can attribute that state.
+///
+/// Healthy steady state: avg ≈ RTT + input lead in ticks (single digits),
+/// abort-zone 0%.
+fn log_confirmed_lag(
+    timeline: Res<LocalTimeline>,
+    query: Query<&ConfirmedTick, With<Predicted>>,
+    // (sum, max, samples, abort_zone_samples)
+    mut acc: Local<(i64, i64, u32, u32)>,
+    mut ticks: Local<u32>,
+) {
+    let tick = timeline.tick();
+    let (sum, max, samples, abort) = &mut *acc;
+    for confirmed in query.iter() {
+        let delta = (tick - confirmed.tick) as i64;
+        *sum += delta;
+        *max = (*max).max(delta);
+        *samples += 1;
+        if delta > 100 {
+            *abort += 1;
+        }
+    }
+
+    *ticks += 1;
+    if *ticks >= 64 {
+        if *samples > 0 {
+            let avg = *sum as f64 / *samples as f64;
+            let pct = *abort as f64 * 100.0 / *samples as f64;
+            if *abort > 0 {
+                warn!(
+                    "[CONFIRM LAG] avg={avg:.1} ticks, max={max} ticks, abort-zone(>100)={abort}/{samples} samples ({pct:.0}%) — server corrections DROPPED for abort-zone samples"
+                );
+            } else {
+                info!("[CONFIRM LAG] avg={avg:.1} ticks, max={max} ticks, abort-zone 0%");
+            }
+        }
+        *acc = (0, 0, 0, 0);
+        *ticks = 0;
+    }
 }
 
 // ========================================
