@@ -91,7 +91,10 @@ fn main() {
 
     // Death and respawn
     app.init_resource::<PendingRespawns>();
-    app.add_systems(FixedUpdate, (kill_plane, check_player_death, process_respawns).chain());
+    app.add_systems(
+        FixedUpdate,
+        (kill_plane, check_player_death, publish_kill_feed, process_respawns).chain(),
+    );
 
     // Wallet auth: process incoming auth messages from clients
     app.add_systems(Update, process_wallet_auth);
@@ -358,7 +361,7 @@ fn kill_plane(
 /// the death position. This is the core loot loop — die, lose your stuff.
 fn check_player_death(
     mut death_query: Query<
-        (Entity, &PlayerHealth, &PlayerId, &PlayerDisplayId, &LastDamagedBy,
+        (Entity, &PlayerHealth, &PlayerDisplayId, &LastDamagedBy,
          &Position, &mut PlayerEquipped, &mut PlayerInventory),
         (Changed<PlayerHealth>, Without<PlayerDead>),
     >,
@@ -368,7 +371,7 @@ fn check_player_death(
     mut pending: ResMut<PendingRespawns>,
     time: Res<Time>,
 ) {
-    for (entity, health, player_id, victim_display, last_damaged_by,
+    for (entity, health, victim_display, last_damaged_by,
          death_pos, mut equipped, mut inventory) in death_query.iter_mut()
     {
         if health.0 > 0 {
@@ -432,14 +435,27 @@ fn check_player_death(
             Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
         ));
         pending.timers.push((entity, time.elapsed_secs() + RESPAWN_DELAY));
+    }
+}
 
-        // Spawn kill feed entry — replicated to all clients
-        let now = time.elapsed_secs();
+/// Server-only: publishes a replicated kill feed entry for each newly dead
+/// player. Split from `check_player_death` so death/respawn game logic stays
+/// free of replication concerns (and headless-testable) — `Replicate`'s
+/// component hooks require the full lightyear server stack.
+///
+/// Runs chained directly after `check_player_death`, so `Added<PlayerDead>`
+/// fires the same tick the death is processed.
+fn publish_kill_feed(
+    newly_dead: Query<(&PlayerId, &LastDamagedBy), Added<PlayerDead>>,
+    mut commands: Commands,
+    time: Res<Time>,
+) {
+    for (player_id, last_damaged_by) in newly_dead.iter() {
         commands.spawn((
             KillFeedEntry {
                 killer_name: multiplayer::auth::client_id_to_base58(last_damaged_by.0),
                 victim_name: multiplayer::auth::client_id_to_base58(player_id.0),
-                timestamp: now,
+                timestamp: time.elapsed_secs(),
             },
             Replicate::to_clients(NetworkTarget::All),
         ));
