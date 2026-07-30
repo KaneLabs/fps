@@ -88,10 +88,11 @@ fn main() {
     // Solana: verified wallets + respawn config + on-chain verifier
     app.init_resource::<VerifiedWallets>();
     let respawn_config = solana::parse_respawn_config();
-    if respawn_config.require_payment {
+    if respawn_config.payment_mode != solana::PaymentMode::Off {
         info!(
-            "[SOLANA] Pay-to-spawn ENABLED — rpc: {}, cost: {} lamports, treasury: {}",
-            respawn_config.rpc_url, respawn_config.respawn_cost_lamports, respawn_config.treasury_address
+            "[SOLANA] Pay-to-spawn ENABLED ({:?}) — rpc: {}, cost: {} lamports, treasury: {}",
+            respawn_config.payment_mode, respawn_config.rpc_url,
+            respawn_config.respawn_cost_lamports, respawn_config.treasury_address
         );
     }
     app.insert_resource(ChainVerifier::json_rpc(&respawn_config.rpc_url));
@@ -573,6 +574,16 @@ fn process_respawns(
                         .entity(entity)
                         .insert(PendingChainCheck(std::sync::Mutex::new(rx)));
                 }
+                RespawnAuth::RequiresPayment { wallet } => {
+                    // Paid mode state machine lands next: await a client-signed
+                    // treasury payment proof and verify it on-chain. Until the
+                    // proof flow is wired, deny and retry (fail closed).
+                    warn!(
+                        "[RESPAWN] Player {} — paid mode awaiting payment flow (wallet {}); denying and retrying",
+                        player_id.0, wallet
+                    );
+                    pending.timers.push((entity, now + RESPAWN_RETRY_DELAY));
+                }
             }
         } else {
             i += 1;
@@ -768,15 +779,15 @@ fn log_input_lag(
 mod respawn_gate_tests {
     use super::*;
     use avian3d::prelude::Rotation;
-    use multiplayer::solana::{BalanceProvider, RespawnConfig};
+    use multiplayer::solana::{BalanceProvider, PaymentMode, RespawnConfig};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
 
-    fn paid_config() -> RespawnConfig {
+    fn balance_config() -> RespawnConfig {
         RespawnConfig {
-            require_payment: true,
+            payment_mode: PaymentMode::BalanceGate,
             ..RespawnConfig::default()
         }
     }
@@ -963,7 +974,7 @@ mod respawn_gate_tests {
 
     #[test]
     fn payment_mode_unverified_wallet_stays_dead_and_requeues() {
-        let mut app = gate_app(paid_config());
+        let mut app = gate_app(balance_config());
         let e = spawn_player(&mut app, 7);
         kill(&mut app, e);
         advance(&mut app, 0.0);
@@ -987,7 +998,7 @@ mod respawn_gate_tests {
     #[test]
     fn payment_mode_funded_wallet_respawns_after_chain_check() {
         let chain = MockChain::default();
-        let config = paid_config();
+        let config = balance_config();
         chain.set_balance(WALLET, config.respawn_cost_lamports);
         let gate = Arc::new(Mutex::new(()));
         let mut app = gate_app_with(
@@ -1021,7 +1032,7 @@ mod respawn_gate_tests {
     #[test]
     fn payment_mode_underfunded_wallet_stays_dead_then_respawns_after_topup() {
         let chain = MockChain::default();
-        let config = paid_config();
+        let config = balance_config();
         let cost = config.respawn_cost_lamports;
         chain.set_balance(WALLET, cost - 1);
         let mut app = gate_app_with(config, Arc::new(chain.clone()));
@@ -1051,7 +1062,7 @@ mod respawn_gate_tests {
 
     #[test]
     fn payment_mode_rpc_outage_fails_closed() {
-        let mut app = gate_app_with(paid_config(), Arc::new(DeadRpc));
+        let mut app = gate_app_with(balance_config(), Arc::new(DeadRpc));
         let e = spawn_player(&mut app, 7);
         verify_wallet(&mut app, 7, WALLET);
 
@@ -1086,7 +1097,7 @@ mod respawn_gate_tests {
     #[ignore = "hits real devnet RPC; needs faucet-funded ~/.anima/keypair.json"]
     fn devnet_e2e_funded_respawns_unfunded_stays_dead() {
         let config = RespawnConfig {
-            require_payment: true,
+            payment_mode: PaymentMode::BalanceGate,
             rpc_url: "https://api.devnet.solana.com".to_string(),
             ..RespawnConfig::default()
         };

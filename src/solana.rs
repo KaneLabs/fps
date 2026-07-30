@@ -133,25 +133,48 @@ use serde::{Deserialize, Serialize};
 // Respawn Authorization
 // ========================================
 
+/// How respawns are gated against the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PaymentMode {
+    /// Free respawns; the chain is never consulted. Local dev default.
+    #[default]
+    Off,
+    /// Respawn requires the verified wallet to HOLD >= `respawn_cost_lamports`
+    /// on-chain. No transfer happens — respawn friction without payment
+    /// friction. Staging / playtest mode.
+    BalanceGate,
+    /// True pay-per-respawn: the client signs and submits a SOL transfer to
+    /// the treasury; the server verifies the transaction on-chain before
+    /// authorizing (server-as-verifier). Production mode.
+    Paid,
+}
+
+impl PaymentMode {
+    /// Parse "off" | "balance" | "paid" (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "balance" => Some(Self::BalanceGate),
+            "paid" => Some(Self::Paid),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for the pay-to-respawn system.
 ///
-/// In dev mode, `require_payment` is false and all respawns are free.
-/// In production, the server checks the player's Solana wallet for:
-/// 1. ANIMA_RESPAWN tokens (burned on use)
-/// 2. Sufficient SOL balance (transferred to treasury)
-///
-/// The `respawn_cost_lamports` field sets the SOL cost if no respawn tokens
-/// are available. 1 SOL = 1_000_000_000 lamports.
+/// See `PaymentMode` for the three gating modes. The cost applies to both
+/// gated modes: the balance a wallet must hold (BalanceGate) or the amount
+/// it must transfer to the treasury (Paid).
 #[derive(Resource, Clone, Debug)]
 pub struct RespawnConfig {
-    /// Whether respawn requires payment. False in dev, true in production.
-    pub require_payment: bool,
+    /// How respawns are gated. Off in local dev.
+    pub payment_mode: PaymentMode,
 
-    /// SOL cost to respawn (in lamports) if no RESPAWN tokens available.
-    /// Default: 10_000_000 (0.01 SOL)
+    /// Respawn cost in lamports. Default: 10_000_000 (0.01 SOL).
     pub respawn_cost_lamports: u64,
 
-    /// Solana RPC endpoint for balance checks.
+    /// Solana RPC endpoint for on-chain checks.
     /// Default: "http://localhost:8899" (local validator)
     pub rpc_url: String,
 
@@ -163,7 +186,7 @@ impl Default for RespawnConfig {
     fn default() -> Self {
         Self {
             // Dev mode: respawns are free
-            require_payment: false,
+            payment_mode: PaymentMode::Off,
             // 0.01 SOL
             respawn_cost_lamports: 10_000_000,
             // Local validator
@@ -176,12 +199,18 @@ impl Default for RespawnConfig {
 
 /// Parse respawn-payment config from env vars and CLI args.
 /// Precedence: CLI flag > env var > default.
-/// Env vars: ANIMA_RPC_URL, ANIMA_TREASURY.
+/// Env vars: ANIMA_PAYMENT_MODE (off|balance|paid), ANIMA_RPC_URL, ANIMA_TREASURY.
 pub fn parse_respawn_config() -> RespawnConfig {
     let args: Vec<String> = std::env::args().collect();
     let mut config = RespawnConfig::default();
 
     // Env fallbacks (overridden by CLI flags below)
+    if let Ok(mode) = std::env::var("ANIMA_PAYMENT_MODE") {
+        match PaymentMode::parse(&mode) {
+            Some(m) => config.payment_mode = m,
+            None => bevy::log::warn!("ANIMA_PAYMENT_MODE '{mode}' invalid (off|balance|paid) — ignored"),
+        }
+    }
     if let Ok(url) = std::env::var("ANIMA_RPC_URL") {
         config.rpc_url = url;
     }
@@ -189,8 +218,19 @@ pub fn parse_respawn_config() -> RespawnConfig {
         config.treasury_address = addr;
     }
 
+    // Legacy alias from phase A: --require-respawn-payment == balance gate.
     if args.contains(&"--require-respawn-payment".to_string()) {
-        config.require_payment = true;
+        config.payment_mode = PaymentMode::BalanceGate;
+    }
+
+    // Parse --respawn-payment <off|balance|paid>
+    if let Some(pos) = args.iter().position(|a| a == "--respawn-payment") {
+        if let Some(mode) = args.get(pos + 1) {
+            match PaymentMode::parse(mode) {
+                Some(m) => config.payment_mode = m,
+                None => bevy::log::warn!("--respawn-payment '{mode}' invalid (off|balance|paid) — ignored"),
+            }
+        }
     }
 
     // Parse --rpc-url <url>
@@ -213,39 +253,45 @@ pub fn parse_respawn_config() -> RespawnConfig {
 /// Result of the synchronous (in-tick) respawn authorization decision.
 ///
 /// The sync decision never touches the network. When on-chain state must be
-/// consulted, it returns `RequiresChainCheck` and the server spawns an async
-/// balance check (see `spawn_balance_check`) whose `ChainCheckResult` makes
-/// the final call. FixedUpdate is never blocked on RPC.
+/// consulted, it returns a `Requires*` variant and the server runs the
+/// corresponding async check — FixedUpdate is never blocked on RPC.
 #[derive(Debug)]
 pub enum RespawnAuth {
     /// Respawn authorized (free dev mode).
     Authorized,
     /// Respawn denied — wallet not verified.
     WalletNotVerified,
-    /// Payment mode + verified wallet: on-chain balance must be checked
+    /// BalanceGate mode + verified wallet: on-chain balance must be checked
     /// asynchronously before authorizing.
     RequiresChainCheck {
         /// The verified wallet address (base58) to check.
+        wallet: String,
+    },
+    /// Paid mode + verified wallet: a client-signed treasury payment must be
+    /// received and verified on-chain before authorizing.
+    RequiresPayment {
+        /// The verified wallet address (base58) the payment must come from.
         wallet: String,
     },
 }
 
 /// Synchronous part of the respawn authorization decision.
 ///
-/// - `require_payment` false → always authorized (dev mode)
+/// - `PaymentMode::Off` → always authorized (dev mode)
 /// - wallet not verified → denied
-/// - otherwise → the caller must run the async on-chain check
+/// - `BalanceGate` → caller runs the async balance check
+/// - `Paid` → caller awaits + verifies a client-signed treasury payment
 pub fn check_respawn_authorization(
     config: &RespawnConfig,
     client_id: u64,
     verified_wallets: &crate::auth::VerifiedWallets,
 ) -> RespawnAuth {
     // Dev mode: always allow
-    if !config.require_payment {
+    if config.payment_mode == PaymentMode::Off {
         return RespawnAuth::Authorized;
     }
 
-    // Production mode: wallet must be verified first
+    // Gated modes: wallet must be verified first
     if !verified_wallets.is_verified(client_id) {
         return RespawnAuth::WalletNotVerified;
     }
@@ -254,7 +300,11 @@ pub fn check_respawn_authorization(
         .get_address(client_id)
         .expect("is_verified checked above")
         .to_string();
-    RespawnAuth::RequiresChainCheck { wallet }
+    match config.payment_mode {
+        PaymentMode::Off => unreachable!("handled above"),
+        PaymentMode::BalanceGate => RespawnAuth::RequiresChainCheck { wallet },
+        PaymentMode::Paid => RespawnAuth::RequiresPayment { wallet },
+    }
 }
 
 // ========================================
@@ -267,9 +317,9 @@ pub fn check_respawn_authorization(
 // getSignatureStatuses when payment verification lands). This keeps the
 // heavy solana-sdk dependency tree out of the game entirely.
 //
-// Phase A (current): respawn requires the verified wallet to hold at least
+// BalanceGate mode: respawn requires the verified wallet to hold at least
 // `respawn_cost_lamports` on the configured cluster (devnet in staging).
-// Phase B (next): verify an actual client-signed payment to the treasury.
+// Paid mode: verify an actual client-signed payment to the treasury.
 
 /// Source of on-chain balance data. Abstracted so the respawn gate is
 /// testable headless with a mock, while production uses JSON-RPC.
@@ -388,9 +438,16 @@ mod tests {
     use super::*;
     use crate::auth::VerifiedWallets;
 
+    fn balance_config() -> RespawnConfig {
+        RespawnConfig {
+            payment_mode: PaymentMode::BalanceGate,
+            ..RespawnConfig::default()
+        }
+    }
+
     fn paid_config() -> RespawnConfig {
         RespawnConfig {
-            require_payment: true,
+            payment_mode: PaymentMode::Paid,
             ..RespawnConfig::default()
         }
     }
@@ -405,35 +462,64 @@ mod tests {
     #[test]
     fn dev_mode_always_authorizes_even_unverified() {
         let config = RespawnConfig::default();
-        assert!(!config.require_payment, "default config must be free-respawn dev mode");
+        assert_eq!(config.payment_mode, PaymentMode::Off, "default config must be free-respawn dev mode");
         let result = check_respawn_authorization(&config, 42, &VerifiedWallets::default());
         assert!(matches!(result, RespawnAuth::Authorized));
     }
 
     #[test]
-    fn payment_mode_denies_unverified_wallet() {
-        let result = check_respawn_authorization(&paid_config(), 42, &VerifiedWallets::default());
-        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+    fn gated_modes_deny_unverified_wallet() {
+        for config in [balance_config(), paid_config()] {
+            let result = check_respawn_authorization(&config, 42, &VerifiedWallets::default());
+            assert!(
+                matches!(result, RespawnAuth::WalletNotVerified),
+                "{:?} must deny unverified wallets",
+                config.payment_mode
+            );
+        }
     }
 
     #[test]
-    fn payment_mode_denies_other_clients_verification() {
+    fn gated_modes_deny_other_clients_verification() {
         // Client 99 is verified; client 42 must not ride on it.
-        let result = check_respawn_authorization(&paid_config(), 42, &verified(99));
-        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+        for config in [balance_config(), paid_config()] {
+            let result = check_respawn_authorization(&config, 42, &verified(99));
+            assert!(matches!(result, RespawnAuth::WalletNotVerified));
+        }
     }
 
-    /// The stub is gone: payment mode + verified wallet no longer authorizes
+    /// The stub is gone: balance mode + verified wallet no longer authorizes
     /// blindly — it demands an async on-chain check for the verified wallet.
     #[test]
-    fn payment_mode_verified_wallet_requires_chain_check() {
-        let result = check_respawn_authorization(&paid_config(), 42, &verified(42));
+    fn balance_mode_verified_wallet_requires_chain_check() {
+        let result = check_respawn_authorization(&balance_config(), 42, &verified(42));
         match result {
             RespawnAuth::RequiresChainCheck { wallet } => {
                 assert_eq!(wallet, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
             }
             other => panic!("expected RequiresChainCheck, got {other:?}"),
         }
+    }
+
+    /// Paid mode + verified wallet: a client-signed treasury payment is
+    /// demanded — holding a balance is not enough.
+    #[test]
+    fn paid_mode_verified_wallet_requires_payment() {
+        let result = check_respawn_authorization(&paid_config(), 42, &verified(42));
+        match result {
+            RespawnAuth::RequiresPayment { wallet } => {
+                assert_eq!(wallet, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
+            }
+            other => panic!("expected RequiresPayment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payment_mode_parses() {
+        assert_eq!(PaymentMode::parse("off"), Some(PaymentMode::Off));
+        assert_eq!(PaymentMode::parse("Balance"), Some(PaymentMode::BalanceGate));
+        assert_eq!(PaymentMode::parse("PAID"), Some(PaymentMode::Paid));
+        assert_eq!(PaymentMode::parse("mainnet"), None);
     }
 
     // ---- Async balance check ----
