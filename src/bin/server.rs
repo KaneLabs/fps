@@ -12,7 +12,7 @@ use avian3d::prelude::SpatialQueryFilter;
 use multiplayer::auth::{self, VerifiedWallets};
 use multiplayer::player::{player_physics_bundle, player_replicated_bundle, select_spawn_point};
 use multiplayer::protocol::{KillFeedEntry, LastDamagedBy, PlayerActions, PlayerId, PlayerDead, PlayerEquipped, PlayerHealth, PlayerDisplayId, PlayerInventory, PlayerYaw, PlayerPitch, WalletAuthMessage};
-use multiplayer::solana::{self, RespawnAuth, RespawnConfig, WalletAddress};
+use multiplayer::solana::{self, ChainCheckResult, ChainVerifier, RespawnAuth, RespawnConfig, WalletAddress};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics, Equippable};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
 
@@ -85,15 +85,23 @@ fn main() {
     // Player ID counter
     app.init_resource::<PlayerCounter>();
 
-    // Solana: verified wallets + respawn config
+    // Solana: verified wallets + respawn config + on-chain verifier
     app.init_resource::<VerifiedWallets>();
-    app.insert_resource(solana::parse_respawn_config());
+    let respawn_config = solana::parse_respawn_config();
+    if respawn_config.require_payment {
+        info!(
+            "[SOLANA] Pay-to-spawn ENABLED — rpc: {}, cost: {} lamports, treasury: {}",
+            respawn_config.rpc_url, respawn_config.respawn_cost_lamports, respawn_config.treasury_address
+        );
+    }
+    app.insert_resource(ChainVerifier::json_rpc(&respawn_config.rpc_url));
+    app.insert_resource(respawn_config);
 
     // Death and respawn
     app.init_resource::<PendingRespawns>();
     app.add_systems(
         FixedUpdate,
-        (kill_plane, check_player_death, publish_kill_feed, process_respawns).chain(),
+        (kill_plane, check_player_death, publish_kill_feed, process_respawns, poll_chain_checks).chain(),
     );
 
     // Wallet auth: process incoming auth messages from clients
@@ -462,22 +470,59 @@ fn publish_kill_feed(
     }
 }
 
-/// Server-only: processes respawn timers. Revives players after delay.
-/// Picks the spawn point furthest from living players to avoid spawn-camping.
+/// Retry delay (seconds) after a denied respawn (unverified wallet,
+/// insufficient funds, or RPC failure).
+const RESPAWN_RETRY_DELAY: f32 = 5.0;
+
+/// Server-only marker: an async on-chain balance check is in flight for this
+/// dead player. Holds the receiver for the worker thread's verdict; polled by
+/// `poll_chain_checks` with `try_recv` — the game loop never blocks on RPC.
+/// (`Mutex` only because components must be `Sync`; there is no contention.)
+#[derive(Component)]
+struct PendingChainCheck(std::sync::Mutex<std::sync::mpsc::Receiver<ChainCheckResult>>);
+
+/// Revive a dead player at the spawn point furthest from living players.
+#[allow(clippy::too_many_arguments)]
+fn revive_player(
+    entity: Entity,
+    player_id: &PlayerId,
+    health: &mut PlayerHealth,
+    position: &mut Position,
+    rotation: &mut avian3d::prelude::Rotation,
+    equipped: &mut PlayerEquipped,
+    inventory: &mut PlayerInventory,
+    living_positions: &[Vec3],
+    commands: &mut Commands,
+) {
+    let spawn_pos = select_spawn_point(living_positions);
+    info!("[RESPAWN] Player {:?} (id={}) respawning at {:?}", entity, player_id.0, spawn_pos);
+    health.0 = 100;
+    position.0 = spawn_pos;
+    rotation.0 = Quat::IDENTITY;
+    // Ensure inventory is clean on respawn (should already be empty from death drop)
+    equipped.0 = None;
+    inventory.items.clear();
+    commands.entity(entity).remove::<PlayerDead>();
+}
+
+/// Server-only: processes respawn timers — the pay-to-respawn gate.
 ///
-/// This is the pay-to-respawn gate. Uses `solana::check_respawn_authorization()`
-/// which checks the RespawnConfig:
-/// - Dev mode (default): always authorized (--require-respawn-payment not set)
-/// - Production mode: checks wallet verification, and in the future checks
-///   ANIMA_RESPAWN token balance or SOL balance via Solana RPC.
+/// On timer expiry, `solana::check_respawn_authorization()` decides:
+/// - Dev mode (default): authorized → revive immediately.
+/// - Payment mode, wallet unverified: re-queue (auth may be in flight).
+/// - Payment mode, wallet verified: dispatch an async on-chain balance check
+///   (worker thread + channel); `poll_chain_checks` delivers the verdict.
+///   FixedUpdate never blocks on RPC.
 fn process_respawns(
     mut pending: ResMut<PendingRespawns>,
     mut query: Query<(&mut PlayerHealth, &mut Position, &mut avian3d::prelude::Rotation, &PlayerId, &mut PlayerEquipped, &mut PlayerInventory), With<PlayerDead>>,
+    checks_in_flight: Query<(), With<PendingChainCheck>>,
     living_query: Query<&Position, (With<PlayerId>, Without<PlayerDead>)>,
     mut commands: Commands,
     time: Res<Time>,
     respawn_config: Res<RespawnConfig>,
     verified_wallets: Res<VerifiedWallets>,
+    verifier: Res<ChainVerifier>,
 ) {
     let now = time.elapsed_secs();
     let mut i = 0;
@@ -489,30 +534,22 @@ fn process_respawns(
                 continue;
             };
 
+            // Defensive: never stack a second check on an entity that already
+            // has one in flight (would double-charge once payments land).
+            if checks_in_flight.contains(entity) {
+                continue;
+            }
+
             match solana::check_respawn_authorization(&respawn_config, player_id.0, &verified_wallets) {
                 RespawnAuth::Authorized => {
                     let living_positions: Vec<Vec3> = living_query
                         .iter()
                         .map(|p| p.0)
                         .collect();
-                    let spawn_pos = select_spawn_point(&living_positions);
-
-                    info!("[RESPAWN] Player {:?} (id={}) respawning at {:?}", entity, player_id.0, spawn_pos);
-                    health.0 = 100;
-                    position.0 = spawn_pos;
-                    rotation.0 = Quat::IDENTITY;
-                    // Ensure inventory is clean on respawn (should already be empty from death drop)
-                    equipped.0 = None;
-                    inventory.items.clear();
-                    commands.entity(entity).remove::<PlayerDead>();
-                }
-                RespawnAuth::InsufficientFunds { required_lamports, available_lamports } => {
-                    warn!(
-                        "[RESPAWN] Player {} denied — insufficient funds ({} available, {} required lamports)",
-                        player_id.0, available_lamports, required_lamports
+                    revive_player(
+                        entity, player_id, &mut health, &mut position, &mut rotation,
+                        &mut equipped, &mut inventory, &living_positions, &mut commands,
                     );
-                    // Re-queue with a retry delay — player may fund wallet
-                    pending.timers.push((entity, now + 5.0));
                 }
                 RespawnAuth::WalletNotVerified => {
                     warn!(
@@ -520,11 +557,80 @@ fn process_respawns(
                         player_id.0
                     );
                     // Re-queue — wallet auth may still be in flight
-                    pending.timers.push((entity, now + 5.0));
+                    pending.timers.push((entity, now + RESPAWN_RETRY_DELAY));
+                }
+                RespawnAuth::RequiresChainCheck { wallet } => {
+                    info!(
+                        "[RESPAWN] Player {} — checking on-chain balance of {} (need {} lamports)",
+                        player_id.0, wallet, respawn_config.respawn_cost_lamports
+                    );
+                    let rx = solana::spawn_balance_check(
+                        verifier.0.clone(),
+                        wallet,
+                        respawn_config.respawn_cost_lamports,
+                    );
+                    commands
+                        .entity(entity)
+                        .insert(PendingChainCheck(std::sync::Mutex::new(rx)));
                 }
             }
         } else {
             i += 1;
+        }
+    }
+}
+
+/// Server-only: delivers verdicts from in-flight on-chain balance checks.
+/// Funded → revive. Insufficient funds or RPC failure → stay dead, re-queue
+/// (fail closed: an RPC outage must never grant free respawns).
+fn poll_chain_checks(
+    mut pending: ResMut<PendingRespawns>,
+    mut query: Query<(Entity, &PendingChainCheck, &mut PlayerHealth, &mut Position, &mut avian3d::prelude::Rotation, &PlayerId, &mut PlayerEquipped, &mut PlayerInventory), With<PlayerDead>>,
+    living_query: Query<&Position, (With<PlayerId>, Without<PlayerDead>)>,
+    mut commands: Commands,
+    time: Res<Time>,
+) {
+    let now = time.elapsed_secs();
+    for (entity, check, mut health, mut position, mut rotation, player_id, mut equipped, mut inventory) in query.iter_mut() {
+        let verdict = match check.0.lock().expect("chain check receiver poisoned").try_recv() {
+            Ok(verdict) => verdict,
+            Err(std::sync::mpsc::TryRecvError::Empty) => continue, // still in flight
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                ChainCheckResult::RpcError("balance check thread died".to_string())
+            }
+        };
+        commands.entity(entity).remove::<PendingChainCheck>();
+
+        match verdict {
+            ChainCheckResult::Funded { available_lamports } => {
+                info!(
+                    "[RESPAWN] Player {} funded on-chain ({} lamports available) — authorized",
+                    player_id.0, available_lamports
+                );
+                let living_positions: Vec<Vec3> = living_query
+                    .iter()
+                    .map(|p| p.0)
+                    .collect();
+                revive_player(
+                    entity, player_id, &mut health, &mut position, &mut rotation,
+                    &mut equipped, &mut inventory, &living_positions, &mut commands,
+                );
+            }
+            ChainCheckResult::InsufficientFunds { required_lamports, available_lamports } => {
+                warn!(
+                    "[RESPAWN] Player {} denied — insufficient funds ({} available, {} required lamports)",
+                    player_id.0, available_lamports, required_lamports
+                );
+                // Re-queue with a retry delay — player may fund wallet
+                pending.timers.push((entity, now + RESPAWN_RETRY_DELAY));
+            }
+            ChainCheckResult::RpcError(e) => {
+                warn!(
+                    "[RESPAWN] Player {} — balance check RPC failed ({}); failing closed, will retry",
+                    player_id.0, e
+                );
+                pending.timers.push((entity, now + RESPAWN_RETRY_DELAY));
+            }
         }
     }
 }
@@ -655,15 +761,18 @@ fn log_input_lag(
 // ========================================
 //
 // These prove the pay-to-spawn flow server-side with no networking, no
-// physics, and no renderer. Time is advanced manually for determinism.
-// They pin down CURRENT behavior — including the fact that payment mode
-// with a verified wallet authorizes without any on-chain check (the stub).
-// When the devnet RPC gate lands, the baseline test below must be updated.
+// physics, and no renderer. Game time is advanced manually for determinism;
+// on-chain balance checks run against an in-process mock provider, so the
+// full async dispatch → poll → verdict path is exercised for real.
 #[cfg(test)]
 mod respawn_gate_tests {
     use super::*;
     use avian3d::prelude::Rotation;
-    use multiplayer::solana::RespawnConfig;
+    use multiplayer::solana::{BalanceProvider, RespawnConfig};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
 
     fn paid_config() -> RespawnConfig {
         RespawnConfig {
@@ -672,15 +781,78 @@ mod respawn_gate_tests {
         }
     }
 
+    /// Mock chain: shared mutable balances, so tests can "fund a wallet"
+    /// while the app is running (die broke → top up → respawn).
+    /// Unknown addresses have balance 0 — same as a real cluster.
+    #[derive(Clone, Default)]
+    struct MockChain(Arc<Mutex<HashMap<String, u64>>>);
+
+    impl MockChain {
+        fn set_balance(&self, address: &str, lamports: u64) {
+            self.0.lock().unwrap().insert(address.to_string(), lamports);
+        }
+    }
+
+    impl BalanceProvider for MockChain {
+        fn get_balance(&self, address: &str) -> Result<u64, String> {
+            Ok(*self.0.lock().unwrap().get(address).unwrap_or(&0))
+        }
+    }
+
+    /// Provider that fails every request — simulates an RPC outage.
+    struct DeadRpc;
+    impl BalanceProvider for DeadRpc {
+        fn get_balance(&self, _address: &str) -> Result<u64, String> {
+            Err("connection refused".to_string())
+        }
+    }
+
+    /// Provider that panics if consulted — proves a code path never
+    /// touches the chain (dev mode must work with no RPC at all).
+    struct NoChainAllowed;
+    impl BalanceProvider for NoChainAllowed {
+        fn get_balance(&self, _address: &str) -> Result<u64, String> {
+            panic!("this code path must never consult the chain");
+        }
+    }
+
     /// Headless app with only the death/respawn systems and their resources.
-    fn gate_app(config: RespawnConfig) -> App {
+    fn gate_app_with(config: RespawnConfig, provider: Arc<dyn BalanceProvider>) -> App {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default());
         app.init_resource::<PendingRespawns>();
         app.init_resource::<VerifiedWallets>();
         app.insert_resource(config);
-        app.add_systems(Update, (kill_plane, check_player_death, process_respawns).chain());
+        app.insert_resource(ChainVerifier(provider));
+        app.add_systems(
+            Update,
+            (kill_plane, check_player_death, process_respawns, poll_chain_checks).chain(),
+        );
         app
+    }
+
+    fn gate_app(config: RespawnConfig) -> App {
+        gate_app_with(config, Arc::new(NoChainAllowed))
+    }
+
+    fn verify_wallet(app: &mut App, client_id: u64, address: &str) {
+        app.world_mut()
+            .resource_mut::<VerifiedWallets>()
+            .wallets
+            .insert(client_id, address.to_string());
+    }
+
+    /// Run update cycles (without advancing game time) until the in-flight
+    /// chain check on `e` resolves. Panics if it never does.
+    fn settle_chain_check(app: &mut App, e: Entity) {
+        for _ in 0..400 {
+            if !app.world().entity(e).contains::<PendingChainCheck>() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.update();
+        }
+        panic!("chain check did not resolve within ~2s");
     }
 
     /// Spawn a living player with the full component set the death/respawn
@@ -794,30 +966,87 @@ mod respawn_gate_tests {
         assert_eq!(app.world().resource::<PendingRespawns>().timers.len(), 1);
     }
 
+    // ---- Payment mode: on-chain balance gate (async, mocked chain) ----
+
     #[test]
-    fn payment_mode_wallet_verified_while_dead_respawns_on_retry() {
-        let mut app = gate_app(paid_config());
+    fn payment_mode_funded_wallet_respawns_after_chain_check() {
+        let chain = MockChain::default();
+        let config = paid_config();
+        chain.set_balance(WALLET, config.respawn_cost_lamports);
+        let mut app = gate_app_with(config, Arc::new(chain));
         let e = spawn_player(&mut app, 7);
+        verify_wallet(&mut app, 7, WALLET);
+
         kill(&mut app, e);
         advance(&mut app, 0.0);
-
-        // First expiry: denied (wallet not verified), re-queued at +5s.
         advance(&mut app, RESPAWN_DELAY + 0.1);
-        assert!(is_dead(&app, e));
 
-        // Wallet auth completes while the player is dead.
-        app.world_mut()
-            .resource_mut::<VerifiedWallets>()
-            .wallets
-            .insert(7, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string());
+        // Timer expired → async chain check dispatched, still dead meanwhile.
+        assert!(
+            app.world().entity(e).contains::<PendingChainCheck>(),
+            "verified wallet in payment mode must dispatch a chain check"
+        );
+        assert!(is_dead(&app, e), "must stay dead until the chain check resolves");
 
-        // Next retry window: authorized.
-        // BASELINE / STUB DOCUMENTATION: this respawn happens with NO on-chain
-        // payment — check_respawn_authorization does not touch Solana yet.
-        // When the devnet RPC gate lands, this test must gain a funded-wallet
-        // fixture and an InsufficientFunds counterpart.
-        advance(&mut app, 5.1);
-        assert!(!is_dead(&app, e), "verified wallet must respawn on retry");
+        settle_chain_check(&mut app, e);
+        assert!(!is_dead(&app, e), "funded wallet must respawn once the chain confirms");
         assert_eq!(health(&app, e), 100);
+        assert!(app.world().resource::<PendingRespawns>().timers.is_empty());
+    }
+
+    #[test]
+    fn payment_mode_underfunded_wallet_stays_dead_then_respawns_after_topup() {
+        let chain = MockChain::default();
+        let config = paid_config();
+        let cost = config.respawn_cost_lamports;
+        chain.set_balance(WALLET, cost - 1);
+        let mut app = gate_app_with(config, Arc::new(chain.clone()));
+        let e = spawn_player(&mut app, 7);
+        verify_wallet(&mut app, 7, WALLET);
+
+        kill(&mut app, e);
+        advance(&mut app, 0.0);
+        advance(&mut app, RESPAWN_DELAY + 0.1);
+        settle_chain_check(&mut app, e);
+
+        // InsufficientFunds: stays dead, re-queued for retry.
+        assert!(is_dead(&app, e), "underfunded wallet must not respawn");
+        assert_eq!(
+            app.world().resource::<PendingRespawns>().timers.len(),
+            1,
+            "denied respawn must re-queue for retry"
+        );
+
+        // Player funds their wallet, next retry window authorizes.
+        chain.set_balance(WALLET, cost);
+        advance(&mut app, RESPAWN_RETRY_DELAY + 0.1);
+        settle_chain_check(&mut app, e);
+        assert!(!is_dead(&app, e), "topped-up wallet must respawn on retry");
+        assert_eq!(health(&app, e), 100);
+    }
+
+    #[test]
+    fn payment_mode_rpc_outage_fails_closed() {
+        let mut app = gate_app_with(paid_config(), Arc::new(DeadRpc));
+        let e = spawn_player(&mut app, 7);
+        verify_wallet(&mut app, 7, WALLET);
+
+        kill(&mut app, e);
+        advance(&mut app, 0.0);
+        advance(&mut app, RESPAWN_DELAY + 0.1);
+        settle_chain_check(&mut app, e);
+
+        // RPC down → deny and retry. An outage must never grant free respawns.
+        assert!(is_dead(&app, e), "RPC failure must fail closed, not authorize");
+        assert_eq!(
+            app.world().resource::<PendingRespawns>().timers.len(),
+            1,
+            "RPC failure must re-queue for retry"
+        );
+
+        // Still failing across another retry window.
+        advance(&mut app, RESPAWN_RETRY_DELAY + 0.1);
+        settle_chain_check(&mut app, e);
+        assert!(is_dead(&app, e));
     }
 }
