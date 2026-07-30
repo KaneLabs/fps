@@ -779,7 +779,7 @@ fn log_input_lag(
 mod respawn_gate_tests {
     use super::*;
     use avian3d::prelude::Rotation;
-    use multiplayer::solana::{BalanceProvider, PaymentMode, RespawnConfig};
+    use multiplayer::solana::{ChainRpc, PaymentMode, RespawnConfig};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -804,7 +804,7 @@ mod respawn_gate_tests {
         }
     }
 
-    impl BalanceProvider for MockChain {
+    impl ChainRpc for MockChain {
         fn get_balance(&self, address: &str) -> Result<u64, String> {
             Ok(*self.0.lock().unwrap().get(address).unwrap_or(&0))
         }
@@ -819,7 +819,7 @@ mod respawn_gate_tests {
         gate: Arc<Mutex<()>>,
     }
 
-    impl BalanceProvider for LatchedChain {
+    impl ChainRpc for LatchedChain {
         fn get_balance(&self, address: &str) -> Result<u64, String> {
             let _open = self.gate.lock().unwrap();
             self.inner.get_balance(address)
@@ -828,7 +828,7 @@ mod respawn_gate_tests {
 
     /// Provider that fails every request — simulates an RPC outage.
     struct DeadRpc;
-    impl BalanceProvider for DeadRpc {
+    impl ChainRpc for DeadRpc {
         fn get_balance(&self, _address: &str) -> Result<u64, String> {
             Err("connection refused".to_string())
         }
@@ -837,14 +837,14 @@ mod respawn_gate_tests {
     /// Provider that panics if consulted — proves a code path never
     /// touches the chain (dev mode must work with no RPC at all).
     struct NoChainAllowed;
-    impl BalanceProvider for NoChainAllowed {
+    impl ChainRpc for NoChainAllowed {
         fn get_balance(&self, _address: &str) -> Result<u64, String> {
             panic!("this code path must never consult the chain");
         }
     }
 
     /// Headless app with only the death/respawn systems and their resources.
-    fn gate_app_with(config: RespawnConfig, provider: Arc<dyn BalanceProvider>) -> App {
+    fn gate_app_with(config: RespawnConfig, provider: Arc<dyn ChainRpc>) -> App {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default());
         app.init_resource::<PendingRespawns>();

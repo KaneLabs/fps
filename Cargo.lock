@@ -5002,6 +5002,7 @@ name = "multiplayer"
 version = "0.3.0"
 dependencies = [
  "avian3d",
+ "base64",
  "bevy",
  "bevy_egui",
  "bevy_kira_audio",
