@@ -43,6 +43,11 @@ sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
 Description=Anima Game Server
 After=network-online.target
 Wants=network-online.target
+# Crash alerting: default start-limit (10s/5) with RestartSec=5 means a crash
+# loop NEVER reaches failed state. 5 failures in 5 min -> failed -> OnFailure.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=anima-alert@%N.service
 
 [Service]
 Type=simple
@@ -52,6 +57,8 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/anima-server
 Restart=always
 RestartSec=5
+# Log every abnormal exit, even ones auto-restart recovers from
+ExecStopPost=/usr/local/bin/anima-crash-log.sh
 
 # Resource limits
 LimitNOFILE=65535
@@ -72,6 +79,29 @@ SyslogIdentifier=${SERVICE_NAME}
 [Install]
 WantedBy=multi-user.target
 EOF
+
+echo "==> Installing crash alerting hooks..."
+sudo tee /usr/local/bin/anima-crash-log.sh > /dev/null << 'SCRIPT'
+#!/usr/bin/env bash
+# Invoked by systemd ExecStopPost with SERVICE_RESULT / EXIT_CODE / EXIT_STATUS set.
+if [ "${SERVICE_RESULT:-success}" != "success" ]; then
+  echo "$(date -u +%FT%TZ) anima-server abnormal exit: result=${SERVICE_RESULT} code=${EXIT_CODE:-?} status=${EXIT_STATUS:-?}" >> /opt/anima/alerts.log
+  logger -t anima-alert -p daemon.err "anima-server crashed: result=${SERVICE_RESULT} code=${EXIT_CODE:-?} status=${EXIT_STATUS:-?}"
+fi
+SCRIPT
+sudo chmod 755 /usr/local/bin/anima-crash-log.sh
+
+sudo tee /etc/systemd/system/anima-alert@.service > /dev/null << 'UNIT'
+[Unit]
+Description=Anima failure alert for %i
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "$(date -u +%%FT%%TZ) ANIMA ALERT: %i entered FAILED state (crash loop, start limit hit)" >> /opt/anima/alerts.log; logger -t anima-alert -p daemon.crit "ANIMA ALERT: %i FAILED — crash loop"'
+UNIT
+
+sudo touch "${INSTALL_DIR}/alerts.log"
+sudo chown "${GAME_USER}:${GAME_USER}" "${INSTALL_DIR}/alerts.log"
 
 echo "==> Enabling service..."
 sudo systemctl daemon-reload

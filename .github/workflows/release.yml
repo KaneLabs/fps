@@ -386,10 +386,13 @@ jobs:
             artifacts/anima-linux-server-stable/anima-linux-server.zip
 
   # ============================================
-  # Deploy server binary to Salt Lake City box
+  # Deploy server binary to the game server
+  # Depends ONLY on the server build — a server
+  # hotfix ships without waiting for the (slower)
+  # client builds or the GitHub release job.
   # ============================================
   deploy-server:
-    needs: [version, release]
+    needs: [version, build-linux-server]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     environment: production
@@ -440,13 +443,24 @@ jobs:
             echo "==> Starting ${SERVICE_NAME}..."
             sudo systemctl start ${SERVICE_NAME}
 
-            echo "==> Verifying..."
-            sleep 2
-            if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
-              echo "==> Deploy successful! ${DEPLOY_TAG} is running."
+            echo "==> Verifying (health gate: service active + UDP :5000 bound)..."
+            HEALTHY=0
+            for i in $(seq 1 15); do
+              if sudo systemctl is-active --quiet ${SERVICE_NAME} && ss -uln | grep -q ':5000 '; then
+                HEALTHY=1
+                break
+              fi
+              sleep 2
+            done
+
+            # Hold: make sure it didn't bind and then immediately crash
+            sleep 3
+            if [[ "${HEALTHY}" == "1" ]] && sudo systemctl is-active --quiet ${SERVICE_NAME} && ss -uln | grep -q ':5000 '; then
+              echo "==> Deploy successful! ${DEPLOY_TAG} is running and listening on UDP :5000."
             else
-              echo "==> ERROR: Server failed to start!"
-              sudo journalctl -u ${SERVICE_NAME} --no-pager -n 20
+              echo "==> ERROR: Health gate failed — service not active or UDP :5000 not bound."
+              sudo systemctl status ${SERVICE_NAME} --no-pager || true
+              sudo journalctl -u ${SERVICE_NAME} --no-pager -n 30
               exit 1
             fi
 
