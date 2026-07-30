@@ -180,6 +180,50 @@ pub struct WalletAuthMessage {
     pub signature: Vec<u8>,
 }
 
+// --- Pay-per-respawn (Solana, server-as-verifier) ---
+
+/// Lightyear channel for respawn payment messages.
+/// Reliable + ordered, separate from AuthChannel so the auth handshake and
+/// payment flow never head-of-line block each other.
+pub struct PaymentChannel;
+
+/// Server → Client: sent on death when the server runs in Paid mode.
+/// Tells the client what a respawn costs and how to pay for THIS death.
+///
+/// The client must submit a SOL transfer of `required_lamports` from its
+/// auth-verified wallet to `treasury`, including the memo
+/// "ANIMA_PAY_v1:{client_id}:{nonce}". The nonce is single-use and bound to
+/// this death — a payment without the exact memo is rejected (anti-replay).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RespawnPaymentRequest {
+    /// Lamports the client must transfer to the treasury.
+    pub required_lamports: u64,
+    /// Treasury wallet address (base58) the transfer must go to.
+    pub treasury: String,
+    /// Server-generated one-time nonce for this death.
+    pub nonce: u64,
+}
+
+/// Client → Server: proof of a submitted respawn payment.
+/// The server verifies the transaction on-chain (payer, amount, treasury,
+/// memo nonce, freshness) before authorizing the respawn — the signature
+/// alone proves nothing about what was paid.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RespawnPaymentProof {
+    /// Base58 transaction signature of the client-submitted payment.
+    pub tx_signature: String,
+}
+
+/// Server → Client: verdict on a submitted payment proof, for death-screen UX.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RespawnPaymentStatus {
+    /// True when the payment was verified on-chain; respawn will follow at
+    /// the respawn timer. False when rejected or still unconfirmed.
+    pub accepted: bool,
+    /// Human-readable reason ("payment verified", "wrong amount", ...).
+    pub reason: String,
+}
+
 // --- Protocol Plugin ---
 
 pub struct ProtocolPlugin;
@@ -274,6 +318,24 @@ impl Plugin for ProtocolPlugin {
 
         app.register_message::<WalletAuthMessage>()
             .add_direction(NetworkDirection::ClientToServer);
+
+        // --- Pay-per-respawn Channel + Messages ---
+        // Reliable ordered channel for the payment flow (Paid mode only):
+        // S→C RespawnPaymentRequest on death, C→S RespawnPaymentProof after
+        // the client submits its payment, S→C RespawnPaymentStatus verdict.
+        app.add_channel::<PaymentChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            send_frequency: Duration::default(),
+            priority: 10.0,
+        })
+        .add_direction(NetworkDirection::Bidirectional);
+
+        app.register_message::<RespawnPaymentRequest>()
+            .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<RespawnPaymentProof>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<RespawnPaymentStatus>()
+            .add_direction(NetworkDirection::ServerToClient);
     }
 }
 
