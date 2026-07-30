@@ -548,21 +548,47 @@ pub fn absolutize_look_input(
     }
 }
 
+/// Client-only, per-frame: hard-lock the LOCAL player's rendered yaw to
+/// LocalLook — the CS model where view angles are pure local presentation.
+///
+/// Without this, the camera inherits yaw from the physics `Rotation` component,
+/// which rides the whole netcode pipeline (fixed-tick sampling, frame
+/// interpolation, correction smoothing). Any divergence between that processed
+/// value and the mouse-true LocalLook makes the player walk "straight" relative
+/// to a view that isn't quite their movement basis — felt as a slow sideways
+/// pull. The replicated Rotation still exists and is still synced from
+/// PlayerYaw each tick — it's what OTHER players see; your own eyes never
+/// consume it.
+///
+/// Runs in PostUpdate before transform propagation, i.e. after lightyear's
+/// frame interpolation has written Transform, so this write wins the frame.
+pub fn lock_local_view_yaw(
+    local_look: Res<LocalLook>,
+    mut query: Query<&mut Transform, (With<Controlled>, With<PlayerId>)>,
+) {
+    for mut transform in query.iter_mut() {
+        transform.rotation = Quat::from_rotation_y(local_look.yaw);
+    }
+}
+
 /// Client-only: applies pitch to the camera locally.
 /// Parent player Rotation contains only yaw (capsule stays upright), so the
 /// camera child must apply pitch on its own Transform to look up/down.
 pub fn sync_camera_pitch(
-    player_query: Query<(&PlayerPitch, &Children), With<Controlled>>,
+    local_look: Res<LocalLook>,
+    player_query: Query<&Children, With<Controlled>>,
     mut camera_query: Query<&mut Transform, With<crate::world::WorldModelCamera>>,
 ) {
-    let Ok((pitch, children)) = player_query.single() else {
+    let Ok(children) = player_query.single() else {
         return;
     };
 
     for child in children.iter() {
         if let Ok(mut cam_transform) = camera_query.get_mut(child) {
             // Pitch around X only — yaw comes from parent, no roll.
-            cam_transform.rotation = Quat::from_rotation_x(pitch.0);
+            // LocalLook (mouse-true, per-frame), NOT the netcode-processed
+            // PlayerPitch — the local view never consumes replication state.
+            cam_transform.rotation = Quat::from_rotation_x(local_look.pitch);
         }
     }
 }

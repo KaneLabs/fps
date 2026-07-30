@@ -127,6 +127,15 @@ fn main() {
         OnEnter(AppState::InGame),
         (despawn_menu, spawn_world_model, spawn_lights, connect_to_server),
     );
+    // Local view is 100% mouse-locked (CS model): yaw hard-set on the player
+    // transform after frame interpolation, pitch on the camera child — both
+    // from LocalLook, never from netcode-processed components.
+    app.add_systems(
+        PostUpdate,
+        lock_local_view_yaw
+            .before(bevy::transform::prelude::TransformSystems::Propagate)
+            .run_if(in_state(AppState::InGame)),
+    );
     app.add_systems(
         Update,
         (
