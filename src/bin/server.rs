@@ -1049,4 +1049,60 @@ mod respawn_gate_tests {
         settle_chain_check(&mut app, e);
         assert!(is_dead(&app, e));
     }
+
+    // ---- LIVE DEVNET E2E ----
+
+    /// The full pay-to-spawn loop against REAL devnet: two players die; the
+    /// one whose wallet holds >= respawn_cost on devnet respawns, the one
+    /// with a fresh (0-balance) wallet stays dead. Ignored by default:
+    /// network access + requires ~/.anima/keypair.json to be faucet-funded
+    /// on devnet (`solana airdrop 1 <addr> --url devnet`).
+    /// Run with: `cargo test --bin server -- --ignored`
+    #[test]
+    #[ignore = "hits real devnet RPC; needs faucet-funded ~/.anima/keypair.json"]
+    fn devnet_e2e_funded_respawns_unfunded_stays_dead() {
+        let config = RespawnConfig {
+            require_payment: true,
+            rpc_url: "https://api.devnet.solana.com".to_string(),
+            ..RespawnConfig::default()
+        };
+        let verifier = ChainVerifier::json_rpc(&config.rpc_url);
+        let mut app = gate_app_with(config, verifier.0);
+
+        // Funded: the real client identity wallet (same keypair the
+        // production client signs wallet-auth challenges with).
+        let (_, pubkey) = auth::load_or_create_keypair(None);
+        let funded_wallet = auth::pubkey_address(&pubkey);
+        // Unfunded: a wallet that has never existed on devnet.
+        let fresh = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let unfunded_wallet = auth::pubkey_address(&fresh.verifying_key().to_bytes());
+
+        let funded = spawn_player(&mut app, 1);
+        let unfunded = spawn_player(&mut app, 2);
+        verify_wallet(&mut app, 1, &funded_wallet);
+        verify_wallet(&mut app, 2, &unfunded_wallet);
+
+        kill(&mut app, funded);
+        kill(&mut app, unfunded);
+        advance(&mut app, 0.0);
+        advance(&mut app, RESPAWN_DELAY + 0.1);
+
+        settle_chain_check(&mut app, funded);
+        settle_chain_check(&mut app, unfunded);
+
+        assert!(
+            !is_dead(&app, funded),
+            "devnet-funded wallet {funded_wallet} must respawn (is it faucet-funded?)"
+        );
+        assert_eq!(health(&app, funded), 100);
+        assert!(
+            is_dead(&app, unfunded),
+            "fresh 0-balance wallet {unfunded_wallet} must stay dead"
+        );
+        assert_eq!(
+            app.world().resource::<PendingRespawns>().timers.len(),
+            1,
+            "denied player must be re-queued for retry"
+        );
+    }
 }
