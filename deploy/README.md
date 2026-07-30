@@ -133,6 +133,11 @@ on-box deploy script enforces two guards **before** touching the service:
 2. **Epoch guard** — the deploy refuses to install a commit whose timestamp is
    older than the running build (`/opt/anima/DEPLOY_EPOCH`). This stops racing
    release runs from landing out of order.
+   - **Known false positive:** the guard compares commit *timestamps*, so a
+     rebased or cherry-picked hotfix can carry an older commit date than the
+     running build and be refused even though it is genuinely newer. That is
+     exactly what the force path below is for — don't debug the guard at 3am,
+     just force the deploy (CEO sign-off) and move on.
 
 **Emergency rollback (intentional deploy of an older commit):** set the repo
 variable `DEPLOY_FORCE=1` (Settings → Secrets and variables → Variables) and
