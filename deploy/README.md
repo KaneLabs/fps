@@ -118,6 +118,28 @@ ssh user@slc-server 'sudo systemctl restart anima-server'
 ssh user@slc-server 'journalctl -u anima-server -n 50 --no-pager'
 ```
 
+## Deploy Guards
+
+The `deploy-server` job is serialized (`concurrency: production-deploy`) and the
+on-box deploy script enforces two guards **before** touching the service:
+
+1. **Playtest gate** — if `/opt/anima/playtest-live` exists and is less than 3h
+   old (file mtime), the deploy aborts loudly. Source of truth is the shared
+   note `543fbc05/playtest-live` (CEO sets it; ops mirrors it to the box).
+   - Set:   `sudo touch /opt/anima/playtest-live` (re-touch to renew the 3h window)
+   - Clear: `sudo rm -f /opt/anima/playtest-live`
+   - A stale flag (>3h) is ignored and auto-cleared, so a forgotten flag can
+     never brick deploys overnight.
+2. **Epoch guard** — the deploy refuses to install a commit whose timestamp is
+   older than the running build (`/opt/anima/DEPLOY_EPOCH`). This stops racing
+   release runs from landing out of order.
+
+**Emergency rollback (intentional deploy of an older commit):** set the repo
+variable `DEPLOY_FORCE=1` (Settings → Secrets and variables → Variables) and
+re-run the deploy job — or `sudo touch /opt/anima/FORCE_DEPLOY` on the box
+(one-shot, consumed by the next deploy). Force bypasses **both** guards — CEO
+sign-off required. Remember to unset `DEPLOY_FORCE` afterwards.
+
 ## Website Integration
 
 The playanima.com download buttons point to:
