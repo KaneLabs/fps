@@ -107,6 +107,7 @@ fn main() {
     app.add_plugins(SharedPlugin);
     app.init_state::<AppState>();
     app.insert_resource(CursorState::default());
+    app.insert_resource(LocalLook::default());
     // One Camera2d in Startup — persists until InGame
     app.add_systems(Startup, setup);
 
@@ -148,14 +149,17 @@ fn main() {
             .run_if(not(lightyear::prelude::is_in_rollback)),
     );
     // Leafwing populates `ActionState<PlayerActions>` in `InputManagerSystem::Update`.
-    // We mutate it (rotate Move by yaw, zero Look when cursor unlocked) in
-    // `InputManagerSystem::ManualControl`, which is guaranteed to run after Update.
-    // Then `InputSystems::BufferClientInputs` snapshots the ActionState into the
-    // input buffer and replicates it to the server — so the server sees the final
-    // world-space Move axis directly.
+    // We mutate it in `InputManagerSystem::ManualControl` (guaranteed after Update):
+    //   1. absolutize_look_input — integrate mouse deltas into LocalLook, then
+    //      overwrite the Look axis with ABSOLUTE yaw/pitch (usercmd model)
+    //   2. pre_rotate_move_input — rotate Move into world-space by LocalLook.yaw
+    // Chained: Move must rotate by THIS tick's yaw. Then
+    // `InputSystems::BufferClientInputs` snapshots the ActionState for
+    // replication — the server receives world-space Move + absolute view angles.
     app.add_systems(
         FixedPreUpdate,
-        (pre_rotate_move_input, gate_look_on_cursor)
+        (absolutize_look_input, pre_rotate_move_input)
+            .chain()
             .in_set(InputManagerSystem::ManualControl)
             .before(lightyear::prelude::client::input::InputSystems::BufferClientInputs)
             .run_if(not(lightyear::prelude::is_in_rollback))

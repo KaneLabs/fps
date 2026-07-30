@@ -71,7 +71,11 @@ pub enum PlayerActions {
     /// lightyear's BufferClientInputs captures it, so the value replicated to
     /// the server is already in world-space.
     Move,
-    /// Mouse motion → Vec2 (x = yaw delta, y = pitch delta).
+    /// ABSOLUTE view angles → Vec2 (x = yaw, y = pitch), in radians.
+    /// Leafwing's input map binds this to raw mouse motion, but the client
+    /// converts deltas → absolute in `absolutize_look_input` BEFORE lightyear
+    /// buffers the ActionState (usercmd model, like CS/Valorant view angles).
+    /// Stateless on the wire: a lost input packet cannot cause aim drift.
     Look,
     /// Space → jump
     Jump,

@@ -16,6 +16,13 @@ use crate::protocol::{
 };
 
 pub const PLAYER_MOVE_SPEED: f32 = 7.0;
+/// Max camera pitch (radians). Shared clamp: the client clamps at accumulation
+/// time and the server clamps again on apply (anticheat sanity bound).
+pub const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+/// Mouse sensitivity: radians of yaw per mouse count.
+pub const YAW_SENSITIVITY: f32 = 0.003;
+/// Mouse sensitivity: radians of pitch per mouse count.
+pub const PITCH_SENSITIVITY: f32 = 0.002;
 pub const JUMP_SPEED: f32 = 12.0;  // ~2.25m jump, ~0.75s air time
 pub const GRAVITY: f32 = 32.0;
 pub const SKIN_WIDTH: f32 = 0.02;
@@ -208,10 +215,19 @@ pub fn shared_jump_system(
     }
 }
 
-/// Reads the Look dual-axis (mouse motion) and applies it to yaw/pitch.
-/// Runs on both client (prediction) and server (authority); lightyear's
-/// ActionState replication means the server sees the same mouse deltas the
-/// client buffered.
+/// Applies the Look dual-axis to yaw/pitch. The axis carries ABSOLUTE angles
+/// (x = yaw, y = pitch) — the CS/Valorant "usercmd" model: the client integrates
+/// mouse deltas locally (see `absolutize_look_input`) and transmits the resulting
+/// view angles as ground truth every tick.
+///
+/// Why absolute instead of deltas: yaw-from-deltas is integrated state, so one
+/// lost input causes a PERMANENT client/server aim offset (deadly for hit reg).
+/// Absolute angles are stateless — a lost packet costs nothing because the next
+/// one carries the full truth. This also makes no-rollback-on-look
+/// unconditionally safe (protocol.rs).
+///
+/// Runs on both client (prediction) and server (authority). The pitch clamp
+/// doubles as the server-side sanity bound on client-provided angles.
 pub fn shared_look_system(
     mut query: Query<
         (&ActionState<PlayerActions>, &mut PlayerYaw, &mut PlayerPitch, Has<Interpolated>, Has<PlayerDead>),
@@ -223,14 +239,17 @@ pub fn shared_look_system(
             continue;
         }
 
-        let delta = action.axis_pair(&PlayerActions::Look);
-        if delta == Vec2::ZERO {
+        let angles = action.axis_pair(&PlayerActions::Look);
+        // Exactly (0,0) means "no look data this tick" (e.g. input not yet
+        // received server-side → leafwing default). Keep previous angles rather
+        // than snapping to origin. A real (0,0) after any mouse movement is
+        // float-impossible in practice; at spawn it matches the default anyway.
+        if angles == Vec2::ZERO {
             continue;
         }
 
-        yaw.0 += -delta.x * 0.003;
-        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
-        pitch.0 = (pitch.0 + -delta.y * 0.002).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        yaw.0 = angles.x;
+        pitch.0 = angles.y.clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 }
 
@@ -449,16 +468,20 @@ pub fn sync_rotation_from_yaw(
 /// leafwing's Update set populated the raw WASD axis) and before
 /// `InputSystems::BufferClientInputs` (so the rotated value is what gets replicated).
 pub fn pre_rotate_move_input(
-    mut query: Query<(&PlayerYaw, &mut ActionState<PlayerActions>), With<Controlled>>,
+    local_look: Res<LocalLook>,
+    mut query: Query<&mut ActionState<PlayerActions>, With<Controlled>>,
 ) {
-    let Ok((player_yaw, mut action)) = query.single_mut() else {
+    let Ok(mut action) = query.single_mut() else {
         return;
     };
     let raw = action.axis_pair(&PlayerActions::Move);
     if raw == Vec2::ZERO {
         return;
     }
-    let yaw = player_yaw.0;
+    // LocalLook is the freshest yaw (this tick's mouse already integrated by
+    // absolutize_look_input, chained before this system) — not the predicted
+    // component, which is one tick stale.
+    let yaw = local_look.yaw;
     // WASD yields: x = strafe (+right), y = forward (+up on screen = +W).
     // World forward at yaw=0 is -Z, world right at yaw=0 is +X.
     let forward = Vec2::new(-yaw.sin(), -yaw.cos());
@@ -467,19 +490,43 @@ pub fn pre_rotate_move_input(
     action.set_axis_pair(&PlayerActions::Move, rotated);
 }
 
-/// Client-only: zeros the Look axis when the cursor is unlocked (e.g. Escape pressed).
-/// Prevents mouse deltas from being sent to the server when the player isn't in control.
-/// Runs in FixedPreUpdate in the `InputManagerSystem::ManualControl` set (after leafwing
-/// Update has populated the raw mouse motion) and before BufferClientInputs.
-pub fn gate_look_on_cursor(
+/// Client-side ground truth for view angles — the equivalent of CS's local
+/// viewangles. Mouse deltas integrate into this every tick; the ABSOLUTE result
+/// is what gets written into the Look axis and replicated (usercmd model).
+#[derive(Resource, Default)]
+pub struct LocalLook {
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+/// Client-only: converts the Look axis from raw mouse deltas (populated by
+/// leafwing's Update set) to ABSOLUTE view angles before lightyear's
+/// BufferClientInputs snapshots the ActionState for replication.
+///
+/// - Cursor locked: integrate deltas into `LocalLook` (with sensitivity +
+///   pitch clamp), then write the absolute angles into the axis.
+/// - Cursor unlocked: don't integrate (mouse shouldn't move the camera), but
+///   STILL write the current absolute angles — the server keeps receiving
+///   ground truth every tick, so there's nothing to drift.
+///
+/// Runs in FixedPreUpdate in `InputManagerSystem::ManualControl`, chained
+/// before `pre_rotate_move_input` (which rotates Move by this yaw).
+pub fn absolutize_look_input(
     cursor_state: Res<CursorState>,
+    mut local_look: ResMut<LocalLook>,
     mut query: Query<&mut ActionState<PlayerActions>, With<Controlled>>,
 ) {
-    if cursor_state.locked {
-        return;
-    }
     for mut action in query.iter_mut() {
-        action.set_axis_pair(&PlayerActions::Look, Vec2::ZERO);
+        if cursor_state.locked {
+            let delta = action.axis_pair(&PlayerActions::Look);
+            local_look.yaw += -delta.x * YAW_SENSITIVITY;
+            local_look.pitch =
+                (local_look.pitch + -delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        }
+        action.set_axis_pair(
+            &PlayerActions::Look,
+            Vec2::new(local_look.yaw, local_look.pitch),
+        );
     }
 }
 
