@@ -16,6 +16,9 @@ use multiplayer::solana::{self, RespawnAuth, RespawnConfig, WalletAddress};
 use multiplayer::world::{spawn_server_interactive_objects, spawn_world_physics, Equippable};
 use multiplayer::{SharedPlugin, FIXED_TIMESTEP_HZ, PROTOCOL_ID, SERVER_PORT};
 
+use lightyear::prelude::input::InputBuffer;
+use lightyear::prelude::input::leafwing::LeafwingSnapshot;
+
 use avian3d::prelude::Position;
 
 /// Respawn delay in seconds before a dead player can respawn.
@@ -103,6 +106,9 @@ fn main() {
     // on the client. This system runs on the server and rewinds targets to
     // where the shooter saw them (using the shooter's replicated InterpolationDelay).
     app.add_systems(FixedUpdate, server_shoot_with_lag_comp);
+
+    // Diagnostics: per-player input arrival lateness, logged 1/s
+    app.add_systems(FixedUpdate, log_input_lag);
 
     app.run();
 }
@@ -570,5 +576,60 @@ fn process_wallet_auth(
                 }
             }
         }
+    }
+}
+
+// ========================================
+// Input lag diagnostics
+// ========================================
+
+/// Measures how late client inputs arrive relative to the tick being simulated.
+/// `lag = simulated_tick - last_received_input_tick`:
+///   lag <= 0 → the input for this tick had already arrived (healthy)
+///   lag  > 0 → simulating with a STALE input. Harmless while input is constant,
+///              but accumulates position drift whenever input is changing
+///              (turning while running, jump presses) — the client predicted with
+///              the new input, the server simulated with the old one.
+/// Logged once per second per connected player.
+fn log_input_lag(
+    timeline: Res<LocalTimeline>,
+    query: Query<(
+        &PlayerId,
+        &InputBuffer<LeafwingSnapshot<PlayerActions>, PlayerActions>,
+    )>,
+    mut acc: Local<std::collections::HashMap<u64, (i64, i64, u32, u32)>>,
+    mut ticks: Local<u32>,
+) {
+    let tick = timeline.tick();
+    for (pid, buffer) in query.iter() {
+        let (sum, max, samples, stale) = acc.entry(pid.0).or_default();
+        if let Some(remote) = buffer.last_remote_tick {
+            let lag = (tick - remote) as i64;
+            *sum += lag;
+            *max = (*max).max(lag);
+            *samples += 1;
+            if lag > 0 {
+                *stale += 1;
+            }
+        }
+    }
+
+    *ticks += 1;
+    if *ticks >= 64 {
+        for (pid, (sum, max, samples, stale)) in acc.drain() {
+            if samples == 0 {
+                continue;
+            }
+            info!(
+                "[INPUT LAG] player={} avg={:.1} ticks, max={} ticks, stale={}/{} ticks ({:.0}%)",
+                pid,
+                sum as f64 / samples as f64,
+                max,
+                stale,
+                samples,
+                stale as f64 * 100.0 / samples as f64,
+            );
+        }
+        *ticks = 0;
     }
 }
