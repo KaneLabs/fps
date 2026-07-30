@@ -386,10 +386,12 @@ jobs:
             artifacts/anima-linux-server-stable/anima-linux-server.zip
 
   # ============================================
-  # Deploy server binary to Salt Lake City box
+  # Deploy server binary to the game server
+  # Depends ONLY on the server build — client builds and the GitHub
+  # Release cannot block or delay a server hotfix.
   # ============================================
   deploy-server:
-    needs: [version, release]
+    needs: [version, build-linux-server]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     environment: production
@@ -440,13 +442,26 @@ jobs:
             echo "==> Starting ${SERVICE_NAME}..."
             sudo systemctl start ${SERVICE_NAME}
 
-            echo "==> Verifying..."
-            sleep 2
-            if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
-              echo "==> Deploy successful! ${DEPLOY_TAG} is running."
+            echo "==> Health gate: waiting for service + UDP 5000..."
+            HEALTH_OK=0
+            for i in $(seq 1 15); do
+              sleep 1
+              sudo systemctl is-active --quiet ${SERVICE_NAME} || continue
+              # Socket bound?
+              ss -uln | grep -q ':5000 ' || continue
+              # UDP probe: fails only if kernel answers ICMP port-unreachable
+              if nc -u -z -w 2 127.0.0.1 5000; then
+                HEALTH_OK=1
+                break
+              fi
+            done
+
+            if [ "${HEALTH_OK}" = "1" ]; then
+              echo "==> Deploy successful! ${DEPLOY_TAG} is running and accepting UDP on :5000."
             else
-              echo "==> ERROR: Server failed to start!"
-              sudo journalctl -u ${SERVICE_NAME} --no-pager -n 20
+              echo "==> ERROR: health gate failed (service inactive or UDP 5000 not accepting)"
+              sudo systemctl status ${SERVICE_NAME} --no-pager || true
+              sudo journalctl -u ${SERVICE_NAME} --no-pager -n 30
               exit 1
             fi
 
