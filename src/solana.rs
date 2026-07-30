@@ -271,6 +271,56 @@ pub fn check_respawn_authorization(
     RespawnAuth::Authorized
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::VerifiedWallets;
+
+    fn paid_config() -> RespawnConfig {
+        RespawnConfig {
+            require_payment: true,
+            ..RespawnConfig::default()
+        }
+    }
+
+    fn verified(client_id: u64) -> VerifiedWallets {
+        let mut vw = VerifiedWallets::default();
+        vw.wallets
+            .insert(client_id, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string());
+        vw
+    }
+
+    #[test]
+    fn dev_mode_always_authorizes_even_unverified() {
+        let config = RespawnConfig::default();
+        assert!(!config.require_payment, "default config must be free-respawn dev mode");
+        let result = check_respawn_authorization(&config, 42, &VerifiedWallets::default());
+        assert!(matches!(result, RespawnAuth::Authorized));
+    }
+
+    #[test]
+    fn payment_mode_denies_unverified_wallet() {
+        let result = check_respawn_authorization(&paid_config(), 42, &VerifiedWallets::default());
+        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+    }
+
+    #[test]
+    fn payment_mode_denies_other_clients_verification() {
+        // Client 99 is verified; client 42 must not ride on it.
+        let result = check_respawn_authorization(&paid_config(), 42, &verified(99));
+        assert!(matches!(result, RespawnAuth::WalletNotVerified));
+    }
+
+    /// BASELINE (documents the stub): payment mode + verified wallet currently
+    /// authorizes WITHOUT any on-chain check. When the devnet RPC gate lands,
+    /// this test must change to assert on-chain state is consulted.
+    #[test]
+    fn payment_mode_verified_wallet_currently_authorized_without_chain_check() {
+        let result = check_respawn_authorization(&paid_config(), 42, &verified(42));
+        assert!(matches!(result, RespawnAuth::Authorized));
+    }
+}
+
 /// Replicated component: the player's verified Solana wallet address.
 /// Attached to player entities after successful wallet auth verification.
 /// Visible to all clients (for display in kill feed, scoreboard, etc).
