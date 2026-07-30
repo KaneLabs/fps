@@ -281,17 +281,25 @@ impl Plugin for ProtocolPlugin {
 // Prevent unnecessary rollbacks from floating-point noise.
 // Only rollback if the server/client values differ by more than a small threshold.
 
-// Thresholds tuned for local-authoritative feel: the client's prediction is
-// mostly trusted, server only corrects large disagreements. This avoids the
-// visible "sliding after stop" / rubber-banding caused by 1-2 ticks of input
-// timing jitter between client and server.
+// CS-style: correct EARLY and SMALL, so corrections are invisible (smoothed by
+// `enable_correction()`) instead of rare and huge. The v0.3.0 playtest of
+// 2026-07-30 20:47 showed why the old 3.0m threshold fails: under-threshold
+// divergence compounds through jump-edge branching (one side lands and re-jumps
+// a tick earlier than the other; grounded vs airborne then diverge in both Y
+// and horizontal speed) until it clips 3m about once a second while
+// run+jumping — a visible snap every time. Server [INPUT LAG] was healthy in
+// that window, so this was sim branching, not input staleness. A 0.5m
+// threshold corrects before the branch point drifts far enough to matter.
 //
-// When server and client drift under threshold, `enable_correction()` smooths
-// the drift into Transform over a few frames — invisible to the player.
+// History: thresholds were originally relaxed (39dc492, 83012a4) to stop
+// cross-platform FP drift thrashing — BEFORE the unified shared kinematic
+// controller (#9) and FMA disable existed. If 0.5m re-thrashes (frequent
+// [ROLLBACK] logs at ~0.5m while moving on flat ground), that residual drift
+// is back and this needs data, not another guess.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
     let err = (this.0 - that.0).length();
-    if err >= 3.0 {
-        // 3 meters — exceed 2m jump peak. Log so playtests can attribute snaps.
+    if err >= 0.5 {
+        // Log magnitude so playtests can attribute corrections.
         bevy::log::info!("[ROLLBACK] Position error {err:.2}m (client {:?} vs server {:?})", this.0, that.0);
         return true;
     }
