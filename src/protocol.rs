@@ -72,10 +72,10 @@ pub enum PlayerActions {
     /// the server is already in world-space.
     Move,
     /// ABSOLUTE view angles → Vec2 (x = yaw, y = pitch), in radians.
-    /// Leafwing's input map binds this to raw mouse motion, but the client
-    /// converts deltas → absolute in `absolutize_look_input` BEFORE lightyear
-    /// buffers the ActionState (usercmd model, like CS/Valorant view angles).
-    /// Stateless on the wire: a lost input packet cannot cause aim drift.
+    /// VIRTUAL axis — no input binding. The client integrates mouse motion
+    /// per-frame into `LocalLook` and writes the absolute angles here per-tick
+    /// (usercmd model, like CS/Valorant view angles). Stateless on the wire:
+    /// a lost input packet cannot cause aim drift.
     Look,
     /// Space → jump
     Jump,

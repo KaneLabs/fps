@@ -130,6 +130,7 @@ fn main() {
     app.add_systems(
         Update,
         (
+            integrate_mouse_look,
             sync_camera_pitch,
             grab_mouse,
             change_fov,
@@ -148,12 +149,13 @@ fn main() {
             .run_if(in_state(AppState::InGame))
             .run_if(not(lightyear::prelude::is_in_rollback)),
     );
-    // Leafwing populates `ActionState<PlayerActions>` in `InputManagerSystem::Update`.
-    // We mutate it in `InputManagerSystem::ManualControl` (guaranteed after Update):
-    //   1. absolutize_look_input — integrate mouse deltas into LocalLook, then
-    //      overwrite the Look axis with ABSOLUTE yaw/pitch (usercmd model)
+    // Mouse → LocalLook happens per-FRAME in Update (integrate_mouse_look).
+    // Per fixed tick, in `InputManagerSystem::ManualControl` (after leafwing's
+    // Update set), we finalize the ActionState before lightyear buffers it:
+    //   1. absolutize_look_input — pure write of ABSOLUTE yaw/pitch from
+    //      LocalLook into the (virtual, unbound) Look axis
     //   2. pre_rotate_move_input — rotate Move into world-space by LocalLook.yaw
-    // Chained: Move must rotate by THIS tick's yaw. Then
+    // Chained: Move must rotate by the same yaw being transmitted. Then
     // `InputSystems::BufferClientInputs` snapshots the ActionState for
     // replication — the server receives world-space Move + absolute view angles.
     app.add_systems(
@@ -1265,7 +1267,11 @@ fn on_predicted_spawn(
     // then receives via lightyear's leafwing input plugin).
     let mut input_map = InputMap::default();
     input_map.insert_dual_axis(PlayerActions::Move, VirtualDPad::wasd());
-    input_map.insert_dual_axis(PlayerActions::Look, MouseMove::default());
+    // Look is a VIRTUAL axis — no input binding. The client integrates raw
+    // mouse motion per-frame into LocalLook (integrate_mouse_look) and writes
+    // absolute yaw/pitch into this axis per-tick (absolutize_look_input).
+    // Binding MouseMove here would put deltas in an axis we overwrite with
+    // absolutes — the feedback loop that caused the e97df6f view-drift bug.
     input_map.insert(PlayerActions::Jump, KeyCode::Space);
     input_map.insert(PlayerActions::Interact, KeyCode::KeyE);
     input_map.insert(PlayerActions::Drop, KeyCode::KeyG);

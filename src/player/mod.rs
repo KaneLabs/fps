@@ -491,38 +491,56 @@ pub fn pre_rotate_move_input(
 }
 
 /// Client-side ground truth for view angles — the equivalent of CS's local
-/// viewangles. Mouse deltas integrate into this every tick; the ABSOLUTE result
-/// is what gets written into the Look axis and replicated (usercmd model).
+/// viewangles. Mouse motion integrates into this ONCE PER FRAME
+/// (`integrate_mouse_look`); the ABSOLUTE result is written into the Look axis
+/// each fixed tick (`absolutize_look_input`) and replicated (usercmd model).
 #[derive(Resource, Default)]
 pub struct LocalLook {
     pub yaw: f32,
     pub pitch: f32,
 }
 
-/// Client-only: converts the Look axis from raw mouse deltas (populated by
-/// leafwing's Update set) to ABSOLUTE view angles before lightyear's
-/// BufferClientInputs snapshots the ActionState for replication.
+/// Client-only, PER-FRAME (Update): integrate this frame's mouse motion into
+/// `LocalLook`. Mouse deltas are frame-rate data and MUST be consumed exactly
+/// once per frame.
 ///
-/// - Cursor locked: integrate deltas into `LocalLook` (with sensitivity +
-///   pitch clamp), then write the absolute angles into the axis.
-/// - Cursor unlocked: don't integrate (mouse shouldn't move the camera), but
-///   STILL write the current absolute angles — the server keeps receiving
-///   ground truth every tick, so there's nothing to drift.
-///
-/// Runs in FixedPreUpdate in `InputManagerSystem::ManualControl`, chained
-/// before `pre_rotate_move_input` (which rotates Move by this yaw).
-pub fn absolutize_look_input(
+/// History: v0.3.0-e97df6f integrated deltas per FIXED TICK by reading the
+/// leafwing Look axis and then overwriting it with absolute angles. Leafwing
+/// only refreshes the axis once per frame, so on any frame containing two
+/// fixed ticks the second tick read back the absolute yaw AS A DELTA:
+/// yaw += -yaw * sensitivity — an exponential decay toward zero that showed
+/// up as the view "constantly straying" while running (running lowers fps →
+/// more double-tick frames). Per-frame integration + pure per-tick sampling
+/// eliminates the feedback loop by construction.
+pub fn integrate_mouse_look(
     cursor_state: Res<CursorState>,
+    mouse: Res<bevy::input::mouse::AccumulatedMouseMotion>,
     mut local_look: ResMut<LocalLook>,
+) {
+    if !cursor_state.locked {
+        return;
+    }
+    let delta = mouse.delta;
+    if delta == Vec2::ZERO {
+        return;
+    }
+    local_look.yaw += -delta.x * YAW_SENSITIVITY;
+    local_look.pitch =
+        (local_look.pitch + -delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+}
+
+/// Client-only, PER-TICK (FixedPreUpdate, ManualControl): write the ABSOLUTE
+/// view angles into the Look axis before lightyear's BufferClientInputs
+/// snapshots the ActionState for replication.
+///
+/// This is a PURE WRITE — it never reads the axis, so a frame containing
+/// multiple fixed ticks just samples the same absolute state twice, which is
+/// harmless by definition (that's the point of transmitting absolutes).
+pub fn absolutize_look_input(
+    local_look: Res<LocalLook>,
     mut query: Query<&mut ActionState<PlayerActions>, With<Controlled>>,
 ) {
     for mut action in query.iter_mut() {
-        if cursor_state.locked {
-            let delta = action.axis_pair(&PlayerActions::Look);
-            local_look.yaw += -delta.x * YAW_SENSITIVITY;
-            local_look.pitch =
-                (local_look.pitch + -delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-        }
         action.set_axis_pair(
             &PlayerActions::Look,
             Vec2::new(local_look.yaw, local_look.pitch),
