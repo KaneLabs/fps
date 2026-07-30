@@ -802,15 +802,28 @@ fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::Cl
             PeerAddr(server_addr),
             ReplicationReceiver::default(),
             PredictionManager::default(),
-            // NOTE: do NOT insert a custom InputTimelineConfig with input delay.
-            // Playtest 2026-07-29 (v0.3.0-350a630): InputDelayConfig::balanced()
-            // made every action feel like a full server roundtrip and caused
-            // constant vibration — lightyear recomputes the adaptive delay on
-            // every sync event, so RTT jitter flaps the delay value and each flap
-            // shifts the input timeline (a resync). Client::default() provides
-            // the default config (zero input delay, full prediction), which is
-            // the correct feel for a shooter. Revisit only with a FIXED delay
-            // and only if transition mispredictions return.
+            // Input TIMELINE LEAD margin (NOT input delay — that experiment failed,
+            // see v0.3.0-350a630: delay = "press now, apply later", felt terrible).
+            // Lead margin = inputs still apply instantly; the client just runs its
+            // predicted timeline further ahead of the server so input packets
+            // arrive with slack.
+            //
+            // Measured on v0.3.0-05f1ec3: default margin (jitter*4 + 5ms ≈ half a
+            // tick on a clean link) had inputs arriving only ~0.5-1 tick early,
+            // with 14-69% STALE ticks during heavy action (client frame hitches
+            // bunch sends; sync can't see hitches). The server extrapolates missing
+            // inputs (sticky last input) and never retro-corrects, so every stale
+            // tick during changing input bakes permanent divergence → the smooth
+            // 1-3 m/s drift → 3m rollback snaps.
+            //
+            // 40ms ≈ 2.5 ticks of slack at 64Hz. Input delay stays ZERO.
+            InputTimelineConfig::new(
+                SyncConfig {
+                    jitter_margin: Duration::from_millis(40),
+                    ..Default::default()
+                },
+                InputDelayConfig::no_input_delay(),
+            ),
             ReplicationSender::new(
                 Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ),
                 SendUpdatesMode::SinceLastAck,
