@@ -448,6 +448,38 @@ fn check_player_death(
     }
 }
 
+/// Sentinel `LastDamagedBy` value meaning "nobody has damaged this player".
+const NO_KILLER: u64 = 0;
+
+/// Killer label for deaths with no responsible player (kill plane, or a killer
+/// who disconnected before the victim died).
+const ENVIRONMENT_KILLER: &str = "the void";
+
+/// How many leading characters of the wallet address to show as a name.
+/// Matches the existing convention (`&identity.address[..8]` in the client
+/// window title).
+const WALLET_NAME_CHARS: usize = 8;
+
+/// Player-facing display name.
+///
+/// Prefers the verified wallet address, truncated — it is the player's DURABLE
+/// identity and is stable across reconnects. Falls back to the sequential
+/// "Player N" while the wallet is unverified.
+///
+/// Deliberately never derived from the netcode client id: since #19 that id is
+/// random per connection, so naming from it gave a player a different name every
+/// session. `PlayerDisplayId` is also per-session, but it is at least legible
+/// and already what the server logs use.
+fn player_display_name(wallet: &WalletAddress, display: &PlayerDisplayId) -> String {
+    let address = wallet.0.trim();
+    if address.is_empty() {
+        return format!("Player {}", display.0);
+    }
+    // char-wise, not byte-wise: never panic on a non-ASCII boundary even though
+    // base58 addresses are always ASCII.
+    address.chars().take(WALLET_NAME_CHARS).collect()
+}
+
 /// Server-only: publishes a replicated kill feed entry for each newly dead
 /// player. Split from `check_player_death` so death/respawn game logic stays
 /// free of replication concerns (and headless-testable) — `Replicate`'s
@@ -456,15 +488,34 @@ fn check_player_death(
 /// Runs chained directly after `check_player_death`, so `Added<PlayerDead>`
 /// fires the same tick the death is processed.
 fn publish_kill_feed(
-    newly_dead: Query<(&PlayerId, &LastDamagedBy), Added<PlayerDead>>,
+    newly_dead: Query<
+        (&LastDamagedBy, &WalletAddress, &PlayerDisplayId),
+        Added<PlayerDead>,
+    >,
+    all_players: Query<(&PlayerId, &WalletAddress, &PlayerDisplayId)>,
     mut commands: Commands,
     time: Res<Time>,
 ) {
-    for (player_id, last_damaged_by) in newly_dead.iter() {
+    for (last_damaged_by, victim_wallet, victim_display) in newly_dead.iter() {
+        // A killer of 0 is the default LastDamagedBy — nobody ever damaged this
+        // player, so the death was environmental (kill plane). Previously this
+        // base58-encoded the literal id 0 and rendered "11111111 killed X".
+        let killer_name = if last_damaged_by.0 == NO_KILLER {
+            ENVIRONMENT_KILLER.to_string()
+        } else {
+            all_players
+                .iter()
+                .find(|(pid, _, _)| pid.0 == last_damaged_by.0)
+                .map(|(_, wallet, display)| player_display_name(wallet, display))
+                // Killer already disconnected — their entity is gone, so there
+                // is no wallet left to name them by.
+                .unwrap_or_else(|| ENVIRONMENT_KILLER.to_string())
+        };
+
         commands.spawn((
             KillFeedEntry {
-                killer_name: multiplayer::auth::client_id_to_base58(last_damaged_by.0),
-                victim_name: multiplayer::auth::client_id_to_base58(player_id.0),
+                killer_name,
+                victim_name: player_display_name(victim_wallet, victim_display),
                 timestamp: time.elapsed_secs(),
             },
             Replicate::to_clients(NetworkTarget::All),
@@ -1215,5 +1266,90 @@ mod respawn_gate_tests {
             1,
             "denied player must be re-queued for retry"
         );
+    }
+}
+
+// ========================================
+// Kill-feed display names
+// ========================================
+//
+// These pin the naming rule that replaced client-id-derived names: the netcode
+// client id became random per connection in #19, so naming from it gave a player
+// a different name every session.
+#[cfg(test)]
+mod display_name_tests {
+    use super::*;
+
+    const WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+    fn wallet(address: &str) -> WalletAddress {
+        WalletAddress(address.to_string())
+    }
+
+    #[test]
+    fn verified_wallet_is_truncated_to_a_short_name() {
+        let name = player_display_name(&wallet(WALLET), &PlayerDisplayId(3));
+        assert_eq!(name, "7xKXtg2C");
+        assert_eq!(name.chars().count(), WALLET_NAME_CHARS);
+    }
+
+    /// The whole point of the change: the same wallet yields the same name no
+    /// matter which session it is on.
+    #[test]
+    fn same_wallet_yields_same_name_across_sessions() {
+        let first = player_display_name(&wallet(WALLET), &PlayerDisplayId(1));
+        let reconnected = player_display_name(&wallet(WALLET), &PlayerDisplayId(7));
+        assert_eq!(first, reconnected, "name must survive a reconnect");
+    }
+
+    #[test]
+    fn different_wallets_yield_different_names() {
+        let a = player_display_name(&wallet(WALLET), &PlayerDisplayId(1));
+        let b = player_display_name(
+            &wallet("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"),
+            &PlayerDisplayId(1),
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unverified_wallet_falls_back_to_player_number() {
+        assert_eq!(
+            player_display_name(&WalletAddress::default(), &PlayerDisplayId(4)),
+            "Player 4"
+        );
+    }
+
+    /// A whitespace-only address is treated as unverified, not rendered blank.
+    #[test]
+    fn blank_wallet_falls_back_to_player_number() {
+        assert_eq!(
+            player_display_name(&wallet("   "), &PlayerDisplayId(2)),
+            "Player 2"
+        );
+    }
+
+    /// A wallet shorter than the truncation length must not panic.
+    #[test]
+    fn short_wallet_is_returned_whole() {
+        assert_eq!(player_display_name(&wallet("abc"), &PlayerDisplayId(1)), "abc");
+    }
+
+    /// Truncation is char-wise, so a non-ASCII address cannot panic on a byte
+    /// boundary (base58 is always ASCII, but the component is a plain String).
+    #[test]
+    fn non_ascii_wallet_does_not_panic() {
+        let name = player_display_name(&wallet("日本語テストアドレス"), &PlayerDisplayId(1));
+        assert_eq!(name.chars().count(), WALLET_NAME_CHARS);
+    }
+
+    /// Environmental deaths must never render the base58 of id 0 ("11111111"),
+    /// which is what the previous client-id-derived naming produced.
+    #[test]
+    fn no_killer_sentinel_is_not_a_base58_id() {
+        assert_eq!(NO_KILLER, 0);
+        let old_behavior = multiplayer::auth::client_id_to_base58(NO_KILLER);
+        assert_ne!(ENVIRONMENT_KILLER, old_behavior);
+        assert_eq!(ENVIRONMENT_KILLER, "the void");
     }
 }
