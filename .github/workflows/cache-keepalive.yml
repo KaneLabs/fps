@@ -1,0 +1,94 @@
+name: Cache Keepalive
+
+# GitHub deletes any Actions cache not accessed for 7 days. After a quiet
+# week the next push to master rebuilds every crate from scratch: the
+# 2026-08-07 merge train hit this — build-linux-server took 14m00s and
+# push-to-live was 14m25s instead of the usual ~2.5min.
+#
+# This job restores (and re-saves) each of the four release caches on a
+# Mon/Thu schedule, so the 7-day eviction clock never runs out. It builds
+# only — no packaging, no GitHub Release, no deploy — so it cannot touch
+# the live server. Public repo => GitHub-hosted runner minutes are free.
+
+on:
+  schedule:
+    # 06:17 UTC Monday & Thursday — max gap 4 days, well inside the 7-day window.
+    # Off-peak minute to avoid the top-of-hour scheduling backlog.
+    - cron: '17 6 * * 1,4'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Never let two keepalives (or a manual run and a scheduled one) race on
+# the same cache keys.
+concurrency:
+  group: cache-keepalive
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    # Keys must match release.yml exactly, or this warms nothing.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-server
+            os: ubuntu-latest
+            bin: server
+            target: ''
+          - name: linux-x64-client
+            os: ubuntu-latest
+            bin: client
+            target: ''
+          - name: windows-x64-client
+            os: ubuntu-latest
+            bin: client
+            target: x86_64-pc-windows-gnu
+          - name: macos-arm64-client
+            os: macos-latest
+            bin: client
+            target: aarch64-apple-darwin
+
+    name: warm (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release
+          shared-key: ${{ matrix.name }}
+          cache-targets: true
+          cache-all-crates: true
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libvulkan-dev
+
+      - name: Install cross-compilation toolchain
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      - name: Build (warms the cache)
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          if [[ -n "${{ matrix.target }}" ]]; then
+            cargo build --release --bin ${{ matrix.bin }} --target ${{ matrix.target }}
+          else
+            cargo build --release --bin ${{ matrix.bin }}
+          fi
