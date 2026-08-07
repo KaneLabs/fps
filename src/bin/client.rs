@@ -199,6 +199,18 @@ fn main() {
             .run_if(not(lightyear::prelude::is_in_rollback)),
     );
 
+    // Replication-stream watchdog + self-heal (v0.3.0 P0: ClientIdInUse
+    // reconnect race can produce a half-wired session — client→server inputs
+    // flow, server→client updates never apply, ConfirmedTick freezes). If the
+    // stream is frozen >3s while connected, force a full disconnect+reconnect.
+    app.insert_resource(ReplStreamHealth::default());
+    app.add_systems(
+        Update,
+        (repl_stream_health, self_heal_reconnect)
+            .chain()
+            .run_if(in_state(AppState::InGame)),
+    );
+
     app.add_observer(on_predicted_spawn);
     app.add_observer(on_interpolated_spawn);
     app.add_observer(spawn_tracer);
@@ -798,6 +810,12 @@ fn resolve_server_addr() -> SocketAddr {
 }
 
 fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
+    connect_to_server_impl(&mut commands, &identity);
+}
+
+/// Shared by the initial OnEnter(InGame) connect and the [SELF-HEAL] reconnect
+/// path — both must build the link identically.
+fn connect_to_server_impl(commands: &mut Commands, identity: &multiplayer::auth::ClientIdentity) {
     let server_addr = resolve_server_addr();
     info!("Game server: {server_addr}");
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
@@ -958,6 +976,148 @@ fn log_confirmed_lag(
         *acc = (0, 0, 0, 0);
         *ticks = 0;
     }
+}
+
+/// [REPL HEALTH] — server→client replication stream watchdog.
+///
+/// The P0 caught by [CONFIRM LAG] on 2026-07-30: a reconnect inside the netcode
+/// timeout window hits ClientIdInUse server-side, and the session that finally
+/// connects can come up HALF-WIRED — client→server inputs flow perfectly, but
+/// server→client replication updates are never applied. Signature: ConfirmedTick
+/// frozen while connected (delta grows exactly +64 ticks/s). The session feels
+/// fine solo (pure local prediction) and is unplayable with other players.
+///
+/// This watchdog measures the recv side directly (ConfirmedTick advances/s) and
+/// force-reconnects when the stream is frozen. Trigger is deliberately
+/// conservative: >3s with ZERO advances, only while Connected with a predicted
+/// player present — a legit loading stall pauses the whole app (age doesn't
+/// accumulate faster than frames), and connect/handshake time doesn't count
+/// (age resets until the first ConfirmedTick exists).
+#[derive(Resource, Default)]
+struct ReplStreamHealth {
+    last_tick: Option<lightyear::prelude::Tick>,
+    /// Seconds since ConfirmedTick last advanced.
+    age: f32,
+    /// ConfirmedTick advances observed this log window (recv-rate counter).
+    advances: u32,
+    log_timer: f32,
+    /// Seconds until the watchdog may fire again (prevents heal loops).
+    cooldown: f32,
+    heals: u32,
+}
+
+/// Two-phase reconnect state machine (resource exists only while healing).
+#[derive(Resource)]
+struct SelfHealReconnect {
+    timer: f32,
+    teardown_done: bool,
+}
+
+const STREAM_FROZEN_SECS: f32 = 3.0;
+const SELF_HEAL_COOLDOWN_SECS: f32 = 15.0;
+
+fn repl_stream_health(
+    time: Res<Time>,
+    mut health: ResMut<ReplStreamHealth>,
+    confirmed: Query<&ConfirmedTick, With<Predicted>>,
+    client: Query<Entity, (With<Client>, With<Connected>)>,
+    healing: Option<Res<SelfHealReconnect>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    health.cooldown = (health.cooldown - dt).max(0.0);
+    if healing.is_some() {
+        return;
+    }
+    let Ok(client_entity) = client.single() else {
+        // Not connected — nothing to monitor, don't accumulate age.
+        health.age = 0.0;
+        health.last_tick = None;
+        return;
+    };
+    let Ok(confirmed) = confirmed.single() else {
+        // Connected but no predicted player yet (handshake/spawn window).
+        health.age = 0.0;
+        return;
+    };
+
+    match health.last_tick {
+        Some(t) if t == confirmed.tick => health.age += dt,
+        _ => {
+            health.last_tick = Some(confirmed.tick);
+            health.age = 0.0;
+            health.advances += 1;
+        }
+    }
+
+    health.log_timer += dt;
+    if health.log_timer >= 1.0 {
+        info!(
+            "[REPL HEALTH] recv: confirmed-tick advances/s={}, stream-age={:.1}s, self-heals={}",
+            health.advances, health.age, health.heals
+        );
+        health.advances = 0;
+        health.log_timer = 0.0;
+    }
+
+    if health.age > STREAM_FROZEN_SECS && health.cooldown == 0.0 {
+        health.heals += 1;
+        health.cooldown = SELF_HEAL_COOLDOWN_SECS;
+        warn!(
+            "[SELF-HEAL] server→client replication stream FROZEN for {:.1}s \
+             (ConfirmedTick stuck at {:?}) — forcing full reconnect (heal #{})",
+            health.age, confirmed.tick, health.heals
+        );
+        commands.trigger(Disconnect { entity: client_entity });
+        commands.insert_resource(SelfHealReconnect {
+            timer: 0.75,
+            teardown_done: false,
+        });
+    }
+}
+
+/// Executes the reconnect: (1) after a short disconnect grace, despawn the old
+/// link entity and ALL received replicated state (player, doors, equippables —
+/// they will be re-replicated fresh; leaving them would duplicate every world
+/// entity on reconnect), then (2) spawn a fresh link via the same path as the
+/// initial connect. LocalLook survives (it's a resource), so view direction is
+/// preserved across the heal.
+fn self_heal_reconnect(
+    time: Res<Time>,
+    mut commands: Commands,
+    heal: Option<ResMut<SelfHealReconnect>>,
+    client_q: Query<Entity, With<Client>>,
+    replicated_q: Query<Entity, With<Replicated>>,
+    identity: Res<multiplayer::auth::ClientIdentity>,
+    mut health: ResMut<ReplStreamHealth>,
+) {
+    let Some(mut heal) = heal else { return };
+    heal.timer -= time.delta_secs();
+    if heal.timer > 0.0 {
+        return;
+    }
+
+    if !heal.teardown_done {
+        let replicated_count = replicated_q.iter().count();
+        for e in client_q.iter() {
+            commands.entity(e).despawn();
+        }
+        for e in replicated_q.iter() {
+            commands.entity(e).despawn();
+        }
+        info!(
+            "[SELF-HEAL] teardown: old link + {replicated_count} replicated entities despawned; reconnecting in 0.5s"
+        );
+        heal.teardown_done = true;
+        heal.timer = 0.5;
+        return;
+    }
+
+    info!("[SELF-HEAL] reconnecting…");
+    commands.remove_resource::<SelfHealReconnect>();
+    health.last_tick = None;
+    health.age = 0.0;
+    connect_to_server_impl(&mut commands, &identity);
 }
 
 // ========================================
