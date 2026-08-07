@@ -1426,8 +1426,16 @@ fn kill_feed_ui(
 /// Predicted entity spawned — fires for our own player (which has Controlled).
 /// Sets up physics for ALL predicted entities; cameras/input only for controlled ones.
 fn on_predicted_spawn(
+    // Tuple triggers are OR-semantics: this observer fires when EITHER
+    // PlayerId or Predicted is added. The query below is the AND: it only
+    // matches once BOTH are present (whichever lands last passes), and
+    // Without<Player> dedupes if a later add re-fires after init.
+    //
+    // History: before the marker filters, adding PlayerId alone fired BOTH
+    // this observer AND on_interpolated_spawn — the local predicted player
+    // got the remote-player capsule mesh (ghost body on every connect).
     trigger: On<Add, (PlayerId, Predicted)>,
-    query: Query<(&PlayerId, Has<Controlled>)>,
+    query: Query<(&PlayerId, Has<Controlled>), (With<Predicted>, Without<Player>)>,
     position_query: Query<&avian3d::prelude::Position>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1523,10 +1531,14 @@ fn on_predicted_spawn(
 }
 
 /// Remote player: interpolated entity — smooth, slightly delayed, no rubberbanding.
-/// Lightyear never adds Interpolated to our own entity, so no guards needed.
+///
+/// NOTE: lightyear never adds Interpolated to our own entity, but the tuple
+/// trigger fires on Add<PlayerId> too (OR-semantics) — which our own entity
+/// DOES get. The With<Interpolated> filter is what actually keeps this
+/// remote-only; without it the local player got the capsule mesh (ghost).
 fn on_interpolated_spawn(
     trigger: On<Add, (PlayerId, Interpolated)>,
-    query: Query<&PlayerId>,
+    query: Query<&PlayerId, (With<Interpolated>, Without<Player>)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
