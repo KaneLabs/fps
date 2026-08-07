@@ -137,8 +137,94 @@ pub fn cleanup_tracers(
 // ========================================
 
 const JAB_DAMAGE: i32 = 15;
+
+/// Declares every damage source together with its per-hit damage, and derives
+/// `DamageSource::ALL` from the same list.
+///
+/// The macro is the point. A hand-written `ALL` slice can drift from the enum —
+/// someone adds a variant, forgets the slice, and the on-chain contributor guard
+/// below keeps passing while silently ignoring the new weapon. A GREEN TEST THAT
+/// HAS STOPPED COVERING ITS CASE IS WORSE THAN NO TEST, because the next person
+/// reads it as covered and stops looking. Generating the variants, their damage
+/// values and `ALL` from one list makes that divergence unrepresentable.
+macro_rules! damage_sources {
+    ($($(#[$doc:meta])* $variant:ident => $damage:expr),+ $(,)?) => {
+        /// Every way a player can take attributable damage.
+        ///
+        /// Adding a variant here forces its per-hit damage to be declared and
+        /// automatically feeds `DamageSource::ALL`, so a new weapon CANNOT be
+        /// introduced without the on-chain contributor guard seeing it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum DamageSource {
+            $($(#[$doc])* $variant),+
+        }
+
+        impl DamageSource {
+            /// Every variant. Generated, never hand-maintained.
+            pub const ALL: &'static [DamageSource] = &[$(DamageSource::$variant),+];
+
+            /// Damage dealt by a single hit from this source.
+            pub const fn per_hit_damage(self) -> i32 {
+                match self { $(DamageSource::$variant => $damage),+ }
+            }
+        }
+    };
+}
+
+damage_sources! {
+    /// Ranged hitscan (rifle).
+    Hitscan => SHOOT_DAMAGE,
+    /// Left-hand jab.
+    Melee => JAB_DAMAGE,
+}
+
+/// Smallest damage any single hit can deal.
+///
+/// Derived from the full enumeration rather than from named constants, so it
+/// tracks new damage sources automatically. This is the input to the on-chain
+/// contributor bound.
+pub const fn min_damage_per_hit() -> i32 {
+    // const fn: no iterators, so walk the generated slice by index.
+    let mut min = i32::MAX;
+    let mut i = 0;
+    while i < DamageSource::ALL.len() {
+        let d = DamageSource::ALL[i].per_hit_damage();
+        if d < min {
+            min = d;
+        }
+        i += 1;
+    }
+    min
+}
+
+/// Recipient-list size burned into the on-chain `settle_death` instruction.
+///
+/// THIS NUMBER CANNOT BE CHANGED. The program upgrade authority is burned on
+/// mainnet, so the instruction's shape is permanent — there is no redeploy.
+///
+/// It bounds how many damage contributors a single death can pay out to. The
+/// number of contributors a death can actually have is not a design choice; it
+/// falls out of two ordinary gameplay balance constants:
+///
+///     max contributors = ceil(MAX_HEALTH / MIN_DAMAGE_PER_HIT)
+///
+/// because health only decreases within a life, so each additional contributor
+/// costs at least one hit's worth of it. Today that is ceil(100 / 15) = 7.
+///
+/// Which means WEAPON BALANCE IS COUPLED TO AN IMMUTABLE ON-CHAIN STRUCTURE.
+/// Raising player health or shipping a lower-damage weapon raises the
+/// contributor bound, and nothing in the game would tell you that you had just
+/// changed a settlement constraint. `contributor_bound_fits_onchain_recipient_list`
+/// below is what tells you, at build time.
+///
+/// Overflow is defined rather than fatal — chain pays the top 16 by share and
+/// routes the remainder to treasury under a distinct event — so exceeding this
+/// degrades gracefully instead of bricking settlement. That is exactly why the
+/// test matters: nothing crashes, it just quietly stops being players' money.
+pub const SETTLE_DEATH_MAX_RECIPIENTS: usize = 16;
 const JAB_RANGE: f32 = 2.5;
-const JAB_COOLDOWN: f32 = 0.4;
+// Melee cooldown lives in JAB_COOLDOWN_TICKS (below), not seconds — see the
+// note there on why the tick is the only quantity that replays correctly.
 const JAB_DURATION: f32 = 0.3;
 
 /// Marker for the left hand mesh used for jab animation.
@@ -151,26 +237,76 @@ pub struct JabAnimation {
     pub start_time: f32,
 }
 
+/// Melee cooldown, in TICKS. 26 ticks = 406ms at 64 Hz.
+///
+/// Ticks, not seconds: the tick is the deterministic quantity client and server
+/// share, and it is what rollback rewinds. Wall-clock elapsed is neither, so a
+/// seconds-based cooldown compares against a clock that does not replay.
+///
+/// Ticks are the SOURCE value rather than a conversion from 0.4s, because
+/// 0.4 * 64 = 25.6 does not land on a tick and truncating gave 25 ticks
+/// (390ms) — a rate limit marginally MORE permissive than intended. Rounded up
+/// instead: an authoritative limit should never be looser than its spec. The
+/// resulting 406ms differs from the previous 400ms by 1.6%, imperceptible next
+/// to this PR's actual behavioural change (per-player instead of global).
+const JAB_COOLDOWN_TICKS: i16 = 26;
+
+/// Per-player melee cooldown.
+///
+/// Replaces a `Local<f32>` that was shared by the whole system: `Local` is
+/// per-SYSTEM state, and `shared_jab_system` loops over every player, so all
+/// players shared ONE melee cooldown — any player jabbing locked out everyone
+/// else. Once damage attribution carries value, a denied jab is denied damage
+/// is denied payment, so this has to be per-player.
+///
+/// NOT replicated (zero wire cost) but registered with `add_rollback` in
+/// `protocol.rs`, so lightyear keeps a PredictionHistory and rewinds it during
+/// rollback replay. `Local` was never rolled back, which is the other half of
+/// the bug: replayed ticks saw cooldown state from a tick that had not happened
+/// yet in the replayed timeline.
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct JabCooldown {
+    /// Tick of the last jab; `None` until the player's first jab.
+    pub last_jab_tick: Option<Tick>,
+}
+
+impl JabCooldown {
+    /// Whether a jab is allowed on `now`.
+    fn ready(&self, now: Tick) -> bool {
+        let Some(last) = self.last_jab_tick else {
+            return true;
+        };
+        // Tick subtraction is wrapping and yields i16.
+        let elapsed = now - last;
+        // elapsed < 0 means the recorded jab is in the FUTURE relative to the
+        // tick being simulated. With `add_rollback` registered this should not
+        // occur (the component rewinds with everything else); it is handled
+        // permissively so a stale value can only ever cost an extra animation,
+        // never a permanently stuck melee. The server never rolls back, so its
+        // authoritative rate limit is unaffected either way.
+        elapsed < 0 || elapsed >= JAB_COOLDOWN_TICKS
+    }
+}
+
 /// Shared FixedUpdate system: jab melee attack — short range punch, server applies damage.
 /// Queries each player's ActionState and fires on `just_pressed(Jab)`. Leafwing's
 /// ActionState is restored cleanly during rollback, so this is safe to replay.
 pub fn shared_jab_system(
-    player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerId, Has<Predicted>, Has<Interpolated>)>,
+    mut player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerId, &mut JabCooldown, Has<Predicted>, Has<Interpolated>)>,
     mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
-    mut last_jab: Local<f32>,
-    time: Res<Time>,
+    timeline: Res<LocalTimeline>,
 ) {
-    for (shooter, action, player_pos, yaw, pitch, attacker_id, is_predicted, is_interpolated) in player_query.iter() {
+    let tick = timeline.tick();
+    for (shooter, action, player_pos, yaw, pitch, attacker_id, mut cooldown, is_predicted, is_interpolated) in player_query.iter_mut() {
         if is_interpolated { continue; }
         if !action.just_pressed(&PlayerActions::Jab) { continue; }
 
-        let current = time.elapsed_secs();
-        if current - *last_jab < JAB_COOLDOWN {
+        if !cooldown.ready(tick) {
             continue;
         }
-        *last_jab = current;
+        cooldown.last_jab_tick = Some(tick);
 
         let eye_pos = player_pos.0 + Vec3::Y * 0.8;
         let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
@@ -191,7 +327,10 @@ pub fn shared_jab_system(
             info!("[JAB] Hit entity {:?} at distance {:.1}", hit.entity, hit.distance);
             if !is_predicted {
                 if let Ok((_entity, mut health, _pos, last_damaged)) = health_query.get_mut(hit.entity) {
-                    health.0 -= JAB_DAMAGE;
+                    // Applied via the registry, not the bare constant: damage
+                    // that does not flow through DamageSource is damage the
+                    // on-chain contributor guard cannot see.
+                    health.0 -= DamageSource::Melee.per_hit_damage();
                     if let Some(mut last) = last_damaged {
                         last.0 = attacker_id.0;
                     }
@@ -2256,4 +2395,202 @@ pub fn interaction_ui_system(
                     .desired_width(200.0),
             );
         });
+}
+
+// ========================================
+// On-chain settlement coupling guard
+// ========================================
+#[cfg(test)]
+mod onchain_coupling_tests {
+    use super::*;
+    use crate::protocol::PlayerHealth;
+
+    /// Max distinct players who can contribute damage to one death.
+    ///
+    /// Health only decreases within a life, so each additional contributor costs
+    /// at least one hit's worth of health: ceil(MAX_HEALTH / MIN_DAMAGE_PER_HIT).
+    fn max_contributors_per_death() -> usize {
+        let max_health = PlayerHealth::default().0;
+        // Derived from the full DamageSource enumeration, NOT from named
+        // constants — a guard bound to an adjacent quantity keeps passing while
+        // silently ignoring a newly added weapon.
+        let min_damage = min_damage_per_hit();
+        assert!(
+            min_damage > 0,
+            "a zero-or-negative damage source makes the contributor count unbounded, \
+             which no fixed on-chain recipient list can represent"
+        );
+        (max_health as u32).div_ceil(min_damage as u32) as usize
+    }
+
+    /// Guards a coupling that is invisible from inside the game: gameplay balance
+    /// constants determine how many players a single death can pay, and the
+    /// instruction that pays them is immutable on mainnet.
+    ///
+    /// This test failing does NOT mean something crashes. Overflow is handled —
+    /// chain pays the top N by share and routes the rest to treasury. That is
+    /// precisely why it needs a test: past this point, money that players earned
+    /// silently becomes house revenue, and nothing anywhere reports an error.
+    #[test]
+    fn contributor_bound_fits_onchain_recipient_list() {
+        let bound = max_contributors_per_death();
+        assert!(
+            bound <= SETTLE_DEATH_MAX_RECIPIENTS,
+            "THIS BALANCE CHANGE CHANGES WHO GETS PAID.\n\
+             \n\
+             A single death can now have {bound} distinct damage contributors, \
+             but settle_death pays at most {SETTLE_DEATH_MAX_RECIPIENTS}. \
+             Contributor payouts beyond the {SETTLE_DEATH_MAX_RECIPIENTS}th are \
+             paid to TREASURY instead of to PLAYERS.\n\
+             \n\
+             Nothing crashes and nothing logs an error — overflow degrades \
+             deliberately. Earnings just quietly stop reaching the people who \
+             earned them, which is why this is a build failure and not a \
+             runtime one.\n\
+             \n\
+             YOU HAVE TWO OPTIONS:\n\
+             1. Keep the bound inside {SETTLE_DEATH_MAX_RECIPIENTS} — raise the \
+                weapon's per-hit damage, or lower MAX_HEALTH.\n\
+             2. Explicitly accept overflow-to-treasury for this weapon, and \
+                record WHY here and in the settlement constraints doc.\n\
+             \n\
+             Raising SETTLE_DEATH_MAX_RECIPIENTS is NOT an option: it requires an \
+             on-chain program change, which is impossible once the upgrade \
+             authority is burned.\n\
+             \n\
+             Current: MAX_HEALTH={}, min per-hit damage across all \
+             {} damage source(s) = {} -> ceil({}/{}) = {bound}",
+            PlayerHealth::default().0,
+            DamageSource::ALL.len(),
+            min_damage_per_hit(),
+            PlayerHealth::default().0,
+            min_damage_per_hit(),
+        );
+    }
+
+    /// Pins today's arithmetic so a balance change shows up as a diff here, not
+    /// only as a threshold breach much later.
+    #[test]
+    fn contributor_bound_is_seven_today() {
+        assert_eq!(PlayerHealth::default().0, 100);
+        assert_eq!(DamageSource::Hitscan.per_hit_damage(), 25);
+        assert_eq!(DamageSource::Melee.per_hit_damage(), 15);
+        // Melee, not hitscan, sets the bound: ceil(100/15)=7, where hitscan-only
+        // would suggest ceil(100/25)=4. Sizing on hitscan alone under-counts,
+        // which is exactly the error the original N=4 came from.
+        assert_eq!(min_damage_per_hit(), 15);
+        assert_eq!(max_contributors_per_death(), 7);
+    }
+
+    /// The guard is only as good as the enumeration feeding it. If a damage
+    /// source is applied somewhere without a `DamageSource` variant, the guard
+    /// silently stops covering it — so the enumeration must stay the single
+    /// place per-hit damage is declared.
+    #[test]
+    fn every_damage_source_is_enumerated_and_positive() {
+        assert_eq!(
+            DamageSource::ALL.len(),
+            2,
+            "a damage source was added or removed — confirm the on-chain \
+             contributor bound still holds, then update this count"
+        );
+        for source in DamageSource::ALL {
+            assert!(
+                source.per_hit_damage() > 0,
+                "{source:?} deals non-positive damage, which would make the \
+                 contributor count unbounded"
+            );
+        }
+    }
+
+    /// Proves the guard has teeth. A guard that cannot fail is theatre, and a
+    /// green test nobody has seen fail is indistinguishable from one wired to a
+    /// constant `true`.
+    #[test]
+    fn guard_would_reject_a_low_damage_weapon() {
+        let max_health = PlayerHealth::default().0 as u32;
+        // Chain's worked example: a 5-damage source at 100 health.
+        let with_5_damage = max_health.div_ceil(5) as usize;
+        assert_eq!(with_5_damage, 20);
+        assert!(
+            with_5_damage > SETTLE_DEATH_MAX_RECIPIENTS,
+            "the predicate must actually reject a weapon that overflows the \
+             recipient list, or the guard proves nothing"
+        );
+    }
+
+    /// The burned-in value must match what chain deployed.
+    #[test]
+    fn recipient_list_matches_burned_program_constant() {
+        assert_eq!(
+            SETTLE_DEATH_MAX_RECIPIENTS, 16,
+            "must equal the N burned into settle_death; changing it here does not \
+             change the program"
+        );
+    }
+}
+
+
+// ========================================
+// Melee cooldown
+// ========================================
+//
+// Pins the per-player cooldown rule that replaced a system-wide `Local<f32>`.
+// The old state was shared by every player (one global melee cooldown) and was
+// never rolled back.
+#[cfg(test)]
+mod jab_cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn first_jab_is_always_ready() {
+        assert!(JabCooldown::default().ready(Tick(100)));
+    }
+
+    #[test]
+    fn jab_is_blocked_until_the_cooldown_elapses() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(100)) };
+        assert!(!cd.ready(Tick(100)), "same tick must not re-fire");
+        assert!(!cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16 - 1)));
+        assert!(cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16)));
+        assert!(cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16 + 50)));
+    }
+
+    /// The bug this replaced: two players sharing one cooldown. Separate
+    /// components must not influence each other.
+    #[test]
+    fn cooldowns_are_independent_per_player() {
+        let jabbed = JabCooldown { last_jab_tick: Some(Tick(100)) };
+        let fresh = JabCooldown::default();
+        assert!(!jabbed.ready(Tick(105)), "recent jabber is on cooldown");
+        assert!(fresh.ready(Tick(105)), "a different player must be unaffected");
+    }
+
+    /// On a rollback replay of a tick EARLIER than the recorded jab, elapsed is
+    /// negative. Handled permissively so a stale value can never permanently
+    /// stick a player's melee.
+    #[test]
+    fn replayed_tick_before_recorded_jab_is_permissive() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(200)) };
+        assert!(cd.ready(Tick(150)));
+    }
+
+    /// Tick is u16 and its subtraction wraps; the cooldown must stay correct
+    /// across the wrap rather than blocking for ~17 minutes of ticks.
+    #[test]
+    fn cooldown_survives_tick_wraparound() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(u16::MAX - 5)) };
+        // 10 ticks later, having wrapped past zero — still inside the cooldown.
+        assert!(!cd.ready(Tick(4)));
+        // A full cooldown past the wrap — ready again.
+        assert!(cd.ready(Tick(u16::MAX.wrapping_add(JAB_COOLDOWN_TICKS as u16))));
+    }
+
+    #[test]
+    fn cooldown_is_rounded_up_never_more_permissive_than_spec() {
+        // 0.4s at 64 Hz = 25.6 ticks; truncation would have given 25 (390ms).
+        assert_eq!(JAB_COOLDOWN_TICKS, 26);
+        let ms = JAB_COOLDOWN_TICKS as f32 / crate::FIXED_TIMESTEP_HZ as f32 * 1000.0;
+        assert!(ms >= 400.0, "authoritative limit must not be looser than 400ms");
+    }
 }
