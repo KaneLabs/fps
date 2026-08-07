@@ -105,7 +105,9 @@ fn main() {
     );
 
     // Wallet auth: process incoming auth messages from clients
-    app.add_systems(Update, process_wallet_auth);
+    app.init_resource::<SupersededSessions>();
+    // Chained: a session queued for a kick this frame is disconnected this frame.
+    app.add_systems(Update, (process_wallet_auth, kick_superseded_sessions).chain());
 
     // Client handling
     app.add_observer(handle_new_client);
@@ -642,10 +644,62 @@ fn poll_chain_checks(
 /// Process incoming wallet auth messages from clients.
 /// Reads WalletAuthMessage from each client's MessageReceiver, verifies the
 /// Ed25519 signature, and maps the pubkey -> Solana wallet address on the player entity.
+/// Session IDs queued for a kick because the same wallet authenticated on a
+/// newer link. Filled by `process_wallet_auth`, drained by `kick_superseded_sessions`.
+///
+/// Two phases because the kick needs `&mut Link`/`Disconnecting` on a DIFFERENT
+/// ClientOf entity than the one being iterated during auth processing.
+#[derive(Resource, Default)]
+struct SupersededSessions {
+    ids: Vec<u64>,
+}
+
+/// Disconnect sessions superseded by a newer authenticated session of the same
+/// wallet.
+///
+/// Inserting `Disconnecting` is lightyear 0.26's supported single-client kick —
+/// it is exactly what `NetcodeServerPlugin::stop` does per client. In `Last`,
+/// `lightyear_connection::server::ConnectionPlugin::disconnect` turns it into
+/// `Disconnected { reason: None }` and despawns the link entity. Inserting
+/// `Disconnected` directly (or despawning the entity outright) does NOT work:
+/// the former leaves a zombie the netcode layer keeps alive forever, and the
+/// latter skips `ControlledBy::handle_disconnection` entirely, orphaning the
+/// player entity we are trying to remove.
+///
+/// The `Disconnected` insert is what despawns the stale player entity, via
+/// `ControlledBy { lifetime: SessionBased }` — that despawn replicates, so other
+/// clients stop seeing the ghost body. The kicked client is not sent a netcode
+/// disconnect packet (that path is `pub(crate)`), so it notices on its own
+/// timeout; harmless here because the kicked session is already dead or healing.
+fn kick_superseded_sessions(
+    mut superseded: ResMut<SupersededSessions>,
+    client_query: Query<(Entity, &RemoteId), With<ClientOf>>,
+    mut commands: Commands,
+) {
+    if superseded.ids.is_empty() {
+        return;
+    }
+    for old_id in superseded.ids.drain(..) {
+        let Some((entity, _)) = client_query
+            .iter()
+            .find(|(_, remote_id)| remote_id.0.to_bits() == old_id)
+        else {
+            // Already gone (timed out on its own) — nothing to kick.
+            info!("[KICK-OLD] Session {} already gone, no kick needed", old_id);
+            continue;
+        };
+        info!("[KICK-OLD] Disconnecting superseded session {} ({:?})", old_id, entity);
+        commands
+            .entity(entity)
+            .insert(lightyear::connection::client::Disconnecting);
+    }
+}
+
 fn process_wallet_auth(
     mut client_query: Query<(&RemoteId, &mut MessageReceiver<WalletAuthMessage>), With<ClientOf>>,
     mut player_query: Query<(&PlayerId, &mut WalletAddress)>,
     mut verified_wallets: ResMut<VerifiedWallets>,
+    mut superseded: ResMut<SupersededSessions>,
 ) {
     for (remote_id, mut receiver) in client_query.iter_mut() {
         let client_id_bits = remote_id.0.to_bits();
@@ -664,16 +718,49 @@ fn process_wallet_auth(
                 auth::pubkey_address(&auth_msg.pubkey)
             );
 
+            // The signature proves ownership of the WALLET, so it is verified
+            // against the wallet-derived ID from the message's own pubkey — NOT
+            // against the connection's netcode ID, which is now a random
+            // per-session handle (see `mint_session_id` in client.rs). The
+            // netcode ID and the wallet identity are deliberately decoupled;
+            // `verify_auth_signature`'s internal pubkey→ID check still holds
+            // because we hand it the derived ID.
+            let signed_id = auth::pubkey_to_client_id(&auth_msg.pubkey);
+
             match auth::verify_auth_signature(
                 &auth_msg.pubkey,
                 &auth_msg.signature,
-                client_id_bits,
+                signed_id,
             ) {
                 Ok(wallet_address) => {
                     info!(
                         "[AUTH] Wallet VERIFIED for client {}: {}",
                         client_id_bits, wallet_address
                     );
+
+                    // KICK-OLD: this wallet just PROVED itself on this session,
+                    // so any other live session holding the same wallet is a
+                    // stale predecessor (killed client, crash, self-heal) and is
+                    // queued for disconnect. Gating on the verified signature is
+                    // what makes this safe: connect tokens are minted with an
+                    // all-zero private key, so anyone can forge a token for any
+                    // ID — kicking on raw ID collision would let anyone boot any
+                    // player. You can only kick sessions of a wallet you own.
+                    let stale: Vec<u64> = verified_wallets
+                        .wallets
+                        .iter()
+                        .filter(|(id, addr)| **id != client_id_bits && *addr == &wallet_address)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for old_id in stale {
+                        warn!(
+                            "[KICK-OLD] Wallet {} re-authenticated on session {}; \
+                             disconnecting superseded session {}",
+                            wallet_address, client_id_bits, old_id
+                        );
+                        verified_wallets.remove(old_id);
+                        superseded.ids.push(old_id);
+                    }
 
                     // Store in verified wallets resource
                     verified_wallets.wallets.insert(client_id_bits, wallet_address.clone());
