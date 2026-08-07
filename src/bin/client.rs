@@ -80,7 +80,10 @@ fn main() {
 
     // Load or generate persistent Ed25519 keypair (~/.anima/keypair.json)
     let identity = multiplayer::auth::ClientIdentity::load_or_create();
-    info!("Client identity: {} (id={})", identity.address, identity.client_id);
+    info!(
+        "Client identity: {} (name {}) — netcode session id is minted per connect",
+        identity.address, identity.display_name
+    );
 
     let mut app = App::new();
     app.add_plugins(
@@ -809,25 +812,43 @@ fn resolve_server_addr() -> SocketAddr {
     }
 }
 
-fn connect_to_server(mut commands: Commands, identity: Res<multiplayer::auth::ClientIdentity>) {
-    connect_to_server_impl(&mut commands, &identity);
+fn connect_to_server(
+    mut commands: Commands,
+    mut identity: ResMut<multiplayer::auth::ClientIdentity>,
+) {
+    connect_to_server_impl(&mut commands, &mut identity);
 }
 
 /// Shared by the initial OnEnter(InGame) connect and the [SELF-HEAL] reconnect
 /// path — both must build the link identically.
-fn connect_to_server_impl(commands: &mut Commands, identity: &multiplayer::auth::ClientIdentity) {
+///
+/// Takes `&mut` identity because EVERY connect attempt mints a FRESH random
+/// netcode session ID. The wallet (keypair/address) is untouched — only the
+/// per-session handle rotates. This is what removes the `ClientIdInUse`
+/// rejection window: a reconnect can no longer collide with its own stale
+/// session still being timed out server-side.
+fn connect_to_server_impl(
+    commands: &mut Commands,
+    identity: &mut multiplayer::auth::ClientIdentity,
+) {
     let server_addr = resolve_server_addr();
     info!("Game server: {server_addr}");
     let client_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
+    // Fresh session ID per connect attempt — never reuse across reconnects.
+    let session_id = identity.new_session();
+
     let auth = Authentication::Manual {
         server_addr,
-        client_id: identity.client_id,
+        client_id: session_id,
         private_key: [0; 32],
         protocol_id: PROTOCOL_ID,
     };
 
-    info!("Connecting as {} (id={})", identity.address, identity.client_id);
+    info!(
+        "Connecting as {} (wallet {}, session id={})",
+        identity.display_name, identity.address, session_id
+    );
 
     let netcode_config = NetcodeConfig {
         client_timeout_secs: 10,
@@ -887,8 +908,12 @@ fn connect_to_server_impl(commands: &mut Commands, identity: &multiplayer::auth:
 struct PendingWalletAuth(Entity);
 
 /// Client-side system: sends wallet auth message to server after connection.
-/// Signs "ANIMA_AUTH_v1:{client_id}" with the Ed25519 keypair and sends
+/// Signs "ANIMA_AUTH_v1:{session_id}" with the Ed25519 keypair and sends
 /// the pubkey + signature via the AuthChannel for server verification.
+///
+/// `sign_auth()` signs whatever session ID this connection was minted with, so
+/// a reconnect automatically signs its NEW ID. Verifying that proof is also what
+/// authorizes the server to kick this wallet's previous session.
 fn send_wallet_auth(
     pending: Option<Res<PendingWalletAuth>>,
     mut sender_query: Query<(&mut MessageSender<multiplayer::protocol::WalletAuthMessage>, Has<Connected>)>,
@@ -907,7 +932,7 @@ fn send_wallet_auth(
 
     sender.send::<multiplayer::protocol::AuthChannel>(auth_msg);
     info!(
-        "[AUTH] Sent wallet auth to server (pubkey: {}, id: {})",
+        "[AUTH] Sent wallet auth to server (pubkey: {}, session id: {})",
         identity.address, identity.client_id
     );
 
@@ -1088,7 +1113,7 @@ fn self_heal_reconnect(
     heal: Option<ResMut<SelfHealReconnect>>,
     client_q: Query<Entity, With<Client>>,
     replicated_q: Query<Entity, With<Replicated>>,
-    identity: Res<multiplayer::auth::ClientIdentity>,
+    mut identity: ResMut<multiplayer::auth::ClientIdentity>,
     mut health: ResMut<ReplStreamHealth>,
 ) {
     let Some(mut heal) = heal else { return };
@@ -1113,11 +1138,15 @@ fn self_heal_reconnect(
         return;
     }
 
+    // Reconnects on a FRESH session ID (minted inside connect_to_server_impl).
+    // Reusing the old ID made the heal collide with the stale session it was
+    // escaping — ClientIdInUse, then possibly straight back into the half-wired
+    // state that triggered the heal.
     info!("[SELF-HEAL] reconnecting…");
     commands.remove_resource::<SelfHealReconnect>();
     health.last_tick = None;
     health.age = 0.0;
-    connect_to_server_impl(&mut commands, &identity);
+    connect_to_server_impl(&mut commands, &mut identity);
 }
 
 // ========================================

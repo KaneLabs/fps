@@ -79,10 +79,39 @@ pub fn load_or_create_keypair(suffix: Option<&str>) -> (SigningKey, [u8; 32]) {
     }
 }
 
-/// Derive a deterministic u64 client ID from the public key.
-/// Used as the lightyear client ID for networking.
+/// Derive a deterministic u64 from the public key.
+///
+/// NOTE: this is NO LONGER the netcode client ID — see `new_session_id()`. It
+/// survives as the stable short display name for a wallet (the base58 of these
+/// 8 bytes is the name players see in the kill feed).
 pub fn pubkey_to_client_id(pubkey: &[u8; 32]) -> u64 {
     u64::from_le_bytes(pubkey[..8].try_into().unwrap())
+}
+
+/// Mint a fresh random netcode client ID for a new connection attempt.
+///
+/// The netcode client ID is a per-SESSION handle, deliberately NOT derived from
+/// the wallet pubkey. Wallet-derived IDs made every reconnect from the same
+/// wallet collide with its own still-lingering session: lightyear rejects the
+/// new connection with `ClientIdInUse` for up to `client_timeout_secs`, and a
+/// client retrying inside that window could land half-wired — inputs flowing
+/// client→server while server→client replication was never applied (the 21:05
+/// playtest P0, ConfirmedTick frozen for the whole session).
+///
+/// Random per-session IDs mean two sessions of the same wallet never collide,
+/// so the rejection window — and the race inside it — cannot occur at all.
+///
+/// Identity is unaffected: the Ed25519 wallet keypair is still the durable
+/// identity, proven per session by signing this ID (see `sign_auth_message`).
+/// Kicking a stale session is therefore an AUTHENTICATED action at the app
+/// layer, not an unauthenticated one at the netcode layer — see the kick-old
+/// policy in `server.rs`. That distinction matters: connect tokens are minted
+/// with a hardcoded all-zero private key, so anyone can forge a token for any
+/// client ID. Kicking on raw ID collision would let anyone boot any player
+/// knowing only their (public) wallet address.
+pub fn new_session_id() -> u64 {
+    use rand::RngCore;
+    OsRng.next_u64()
 }
 
 /// Get the public key as a Solana-style base58 address string.
@@ -122,9 +151,20 @@ pub fn sign_auth_message(signing_key: &SigningKey, client_id: u64) -> [u8; 64] {
 
 /// Verify an auth signature from a client.
 ///
-/// Checks:
-/// 1. The Ed25519 signature is valid for the auth message
-/// 2. The pubkey's first 8 bytes (LE) match the claimed client_id
+/// Checks that the Ed25519 signature is valid over "ANIMA_AUTH_v1:{client_id}",
+/// where `claimed_client_id` MUST be supplied by the caller from the live
+/// connection (`RemoteId`) — never from the message body.
+///
+/// Session IDs are random per connection (see `new_session_id`), so there is no
+/// longer a pubkey→client_id derivation to check. The binding is now the
+/// signature itself: only the holder of the wallet's private key can sign this
+/// session's ID, and the server compares against the ID the connection actually
+/// has. A client cannot claim a wallet it does not own.
+///
+/// KNOWN GAP (pre-existing, tracked separately): the signed message is
+/// client-chosen, not a server-issued nonce, so a captured (pubkey, signature)
+/// pair can be replayed by reconnecting with the same session ID. Closing this
+/// needs a server→client challenge before auth.
 ///
 /// Returns the full Solana address (base58 pubkey) on success.
 pub fn verify_auth_signature(
@@ -135,14 +175,6 @@ pub fn verify_auth_signature(
     // Signature must be exactly 64 bytes
     if signature_bytes.len() != 64 {
         return Err(AuthError::InvalidSignature);
-    }
-    // 1. Verify client_id derives from this pubkey
-    let derived_id = pubkey_to_client_id(pubkey_bytes);
-    if derived_id != claimed_client_id {
-        return Err(AuthError::ClientIdMismatch {
-            expected: claimed_client_id,
-            derived: derived_id,
-        });
     }
 
     // 2. Reconstruct verifying key from raw bytes
@@ -166,8 +198,6 @@ pub fn verify_auth_signature(
 /// Auth verification errors.
 #[derive(Debug)]
 pub enum AuthError {
-    /// The claimed client_id doesn't match the first 8 bytes of the pubkey
-    ClientIdMismatch { expected: u64, derived: u64 },
     /// The public key bytes are not a valid Ed25519 point
     InvalidPubkey,
     /// The Ed25519 signature does not verify
@@ -177,9 +207,6 @@ pub enum AuthError {
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthError::ClientIdMismatch { expected, derived } => {
-                write!(f, "client_id mismatch: expected {}, derived {}", expected, derived)
-            }
             AuthError::InvalidPubkey => write!(f, "invalid Ed25519 public key"),
             AuthError::InvalidSignature => write!(f, "Ed25519 signature verification failed"),
         }
@@ -187,26 +214,47 @@ impl std::fmt::Display for AuthError {
 }
 
 /// Bevy resource holding the client's identity.
+///
+/// `signing_key`/`pubkey`/`address` are the DURABLE identity (the wallet, loaded
+/// from disk). `client_id` is an EPHEMERAL per-connection handle, re-minted for
+/// every connection attempt — see `new_session()`.
 #[derive(bevy::prelude::Resource)]
 pub struct ClientIdentity {
     pub signing_key: SigningKey,
     pub pubkey: [u8; 32],
+    /// Per-session netcode ID. Random, NOT wallet-derived. Re-minted on every
+    /// connect attempt including self-heal reconnects.
     pub client_id: u64,
     pub address: String,
+    /// Stable short name for this wallet, independent of the session ID.
+    pub display_name: String,
 }
 
 impl ClientIdentity {
     pub fn load_or_create() -> Self {
         let suffix = keypair_suffix_from_args();
         let (signing_key, pubkey) = load_or_create_keypair(suffix.as_deref());
-        let client_id = pubkey_to_client_id(&pubkey);
+        let client_id = new_session_id();
         let address = pubkey_address(&pubkey);
+        let display_name = client_id_to_base58(pubkey_to_client_id(&pubkey));
         Self {
             signing_key,
             pubkey,
             client_id,
             address,
+            display_name,
         }
+    }
+
+    /// Mint a fresh session ID for a new connection attempt.
+    ///
+    /// MUST be called before every connect, including the [SELF-HEAL] reconnect.
+    /// Reusing the ID there was self-defeating: the heal would collide with the
+    /// very stale session it was trying to escape, hit `ClientIdInUse`, and risk
+    /// landing back in the same half-wired state it was healing from.
+    pub fn new_session(&mut self) -> u64 {
+        self.client_id = new_session_id();
+        self.client_id
     }
 
     /// Sign the auth challenge for this identity.
@@ -246,22 +294,25 @@ impl VerifiedWallets {
 mod tests {
     use super::*;
 
+    /// A wallet authenticates over a RANDOM session ID (no pubkey derivation).
     #[test]
     fn test_sign_and_verify() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let pubkey = signing_key.verifying_key().to_bytes();
-        let client_id = pubkey_to_client_id(&pubkey);
+        let client_id = new_session_id();
 
         let sig = sign_auth_message(&signing_key, client_id);
         let result = verify_auth_signature(&pubkey, &sig, client_id);
         assert!(result.is_ok());
     }
 
+    /// The signature is bound to the session ID the SERVER sees. A client that
+    /// signs one ID cannot authenticate a connection carrying a different one.
     #[test]
     fn test_wrong_client_id_fails() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let pubkey = signing_key.verifying_key().to_bytes();
-        let client_id = pubkey_to_client_id(&pubkey);
+        let client_id = new_session_id();
 
         let sig = sign_auth_message(&signing_key, client_id);
         // Try to verify with wrong client_id
@@ -273,11 +324,65 @@ mod tests {
     fn test_wrong_signature_fails() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let pubkey = signing_key.verifying_key().to_bytes();
-        let client_id = pubkey_to_client_id(&pubkey);
+        let client_id = new_session_id();
 
         let mut sig = sign_auth_message(&signing_key, client_id);
         sig[0] ^= 0xFF; // corrupt signature
         let result = verify_auth_signature(&pubkey, &sig, client_id);
         assert!(result.is_err());
+    }
+
+    /// You cannot claim someone else's wallet: signing a session ID with your
+    /// own key never verifies against a victim's pubkey. This is what makes the
+    /// auth-gated kick-old policy safe — kicking requires proving the wallet.
+    #[test]
+    fn test_cannot_claim_another_wallet() {
+        let victim = SigningKey::generate(&mut OsRng);
+        let victim_pubkey = victim.verifying_key().to_bytes();
+        let attacker = SigningKey::generate(&mut OsRng);
+
+        let client_id = new_session_id();
+        // Attacker signs the session ID with their OWN key, claims victim pubkey.
+        let sig = sign_auth_message(&attacker, client_id);
+        let result = verify_auth_signature(&victim_pubkey, &sig, client_id);
+        assert!(result.is_err());
+    }
+
+    /// Session IDs must actually differ between connection attempts — this is
+    /// the whole point of the fix (no self-collision on reconnect).
+    #[test]
+    fn test_session_ids_are_distinct() {
+        let ids: std::collections::HashSet<u64> =
+            (0..64).map(|_| new_session_id()).collect();
+        assert_eq!(ids.len(), 64, "session IDs must be unique per mint");
+    }
+
+    /// Re-minting changes the session ID but never the wallet identity.
+    #[test]
+    fn test_new_session_preserves_wallet_identity() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pubkey = signing_key.verifying_key().to_bytes();
+        let mut identity = ClientIdentity {
+            signing_key,
+            pubkey,
+            client_id: new_session_id(),
+            address: pubkey_address(&pubkey),
+            display_name: client_id_to_base58(pubkey_to_client_id(&pubkey)),
+        };
+
+        let before = identity.client_id;
+        let address_before = identity.address.clone();
+        let name_before = identity.display_name.clone();
+
+        let after = identity.new_session();
+
+        assert_ne!(before, after, "reconnect must mint a fresh session ID");
+        assert_eq!(identity.pubkey, pubkey, "wallet key must survive reconnect");
+        assert_eq!(identity.address, address_before);
+        assert_eq!(identity.display_name, name_before);
+
+        // ...and the new session still authenticates.
+        let sig = sign_auth_message(&identity.signing_key, identity.client_id);
+        assert!(verify_auth_signature(&identity.pubkey, &sig, identity.client_id).is_ok());
     }
 }
