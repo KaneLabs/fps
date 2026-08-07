@@ -9,6 +9,24 @@ name: Cache Keepalive
 # Mon/Thu schedule, so the 7-day eviction clock never runs out. It builds
 # only — no packaging, no GitHub Release, no deploy — so it cannot touch
 # the live server. Public repo => GitHub-hosted runner minutes are free.
+#
+# KNOWN LIMITATION — 60-day dormancy:
+# GitHub automatically DISABLES scheduled workflows in a repo with no
+# activity (commits/issues/etc.) for 60 days. A repo dormant that long
+# therefore loses its cache warmer silently: no failure, no notification,
+# the cron simply stops firing. This DEGRADES to the old behaviour (the
+# next push after a quiet week does a ~14min cold build) rather than
+# breaking anything, so it is not urgent — but it is silent, which is why
+# it is written down here instead of being rediscovered from a slow build.
+#
+# Symptom to recognise: a cold ~14min build after a long gap, plus an
+# empty/stale cache list (`gh api repos/KaneLabs/fps/actions/caches`).
+# Recovery: re-enable via the Actions tab (a banner offers it) or
+#   `gh workflow enable cache-keepalive.yml --repo KaneLabs/fps`
+# then `gh workflow run cache-keepalive.yml --repo KaneLabs/fps` to warm
+# immediately rather than waiting for the next Mon/Thu. Any push to the
+# repo also resets the 60-day dormancy clock, so an active project never
+# hits this.
 
 on:
   schedule:
