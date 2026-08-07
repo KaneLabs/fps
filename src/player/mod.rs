@@ -111,6 +111,11 @@ pub fn player_physics_bundle() -> impl Bundle {
     (
         Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT),
         RigidBody::Kinematic,
+        // Per-player melee cooldown. Non-replicated, so it must be attached
+        // locally on BOTH sides — this bundle is inserted by the server on
+        // connect and by the client on predicted spawn, which is exactly the
+        // symmetry it needs.
+        crate::world::JabCooldown::default(),
     )
 }
 

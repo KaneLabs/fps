@@ -223,7 +223,8 @@ pub const fn min_damage_per_hit() -> i32 {
 /// test matters: nothing crashes, it just quietly stops being players' money.
 pub const SETTLE_DEATH_MAX_RECIPIENTS: usize = 16;
 const JAB_RANGE: f32 = 2.5;
-const JAB_COOLDOWN: f32 = 0.4;
+// Melee cooldown lives in JAB_COOLDOWN_TICKS (below), not seconds — see the
+// note there on why the tick is the only quantity that replays correctly.
 const JAB_DURATION: f32 = 0.3;
 
 /// Marker for the left hand mesh used for jab animation.
@@ -236,26 +237,76 @@ pub struct JabAnimation {
     pub start_time: f32,
 }
 
+/// Melee cooldown, in TICKS. 26 ticks = 406ms at 64 Hz.
+///
+/// Ticks, not seconds: the tick is the deterministic quantity client and server
+/// share, and it is what rollback rewinds. Wall-clock elapsed is neither, so a
+/// seconds-based cooldown compares against a clock that does not replay.
+///
+/// Ticks are the SOURCE value rather than a conversion from 0.4s, because
+/// 0.4 * 64 = 25.6 does not land on a tick and truncating gave 25 ticks
+/// (390ms) — a rate limit marginally MORE permissive than intended. Rounded up
+/// instead: an authoritative limit should never be looser than its spec. The
+/// resulting 406ms differs from the previous 400ms by 1.6%, imperceptible next
+/// to this PR's actual behavioural change (per-player instead of global).
+const JAB_COOLDOWN_TICKS: i16 = 26;
+
+/// Per-player melee cooldown.
+///
+/// Replaces a `Local<f32>` that was shared by the whole system: `Local` is
+/// per-SYSTEM state, and `shared_jab_system` loops over every player, so all
+/// players shared ONE melee cooldown — any player jabbing locked out everyone
+/// else. Once damage attribution carries value, a denied jab is denied damage
+/// is denied payment, so this has to be per-player.
+///
+/// NOT replicated (zero wire cost) but registered with `add_rollback` in
+/// `protocol.rs`, so lightyear keeps a PredictionHistory and rewinds it during
+/// rollback replay. `Local` was never rolled back, which is the other half of
+/// the bug: replayed ticks saw cooldown state from a tick that had not happened
+/// yet in the replayed timeline.
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct JabCooldown {
+    /// Tick of the last jab; `None` until the player's first jab.
+    pub last_jab_tick: Option<Tick>,
+}
+
+impl JabCooldown {
+    /// Whether a jab is allowed on `now`.
+    fn ready(&self, now: Tick) -> bool {
+        let Some(last) = self.last_jab_tick else {
+            return true;
+        };
+        // Tick subtraction is wrapping and yields i16.
+        let elapsed = now - last;
+        // elapsed < 0 means the recorded jab is in the FUTURE relative to the
+        // tick being simulated. With `add_rollback` registered this should not
+        // occur (the component rewinds with everything else); it is handled
+        // permissively so a stale value can only ever cost an extra animation,
+        // never a permanently stuck melee. The server never rolls back, so its
+        // authoritative rate limit is unaffected either way.
+        elapsed < 0 || elapsed >= JAB_COOLDOWN_TICKS
+    }
+}
+
 /// Shared FixedUpdate system: jab melee attack — short range punch, server applies damage.
 /// Queries each player's ActionState and fires on `just_pressed(Jab)`. Leafwing's
 /// ActionState is restored cleanly during rollback, so this is safe to replay.
 pub fn shared_jab_system(
-    player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerId, Has<Predicted>, Has<Interpolated>)>,
+    mut player_query: Query<(Entity, &ActionState<PlayerActions>, &Position, &PlayerYaw, &PlayerPitch, &PlayerId, &mut JabCooldown, Has<Predicted>, Has<Interpolated>)>,
     mut health_query: Query<(Entity, &mut PlayerHealth, &Position, Option<&mut crate::protocol::LastDamagedBy>)>,
     spatial_query: SpatialQuery,
     mut commands: Commands,
-    mut last_jab: Local<f32>,
-    time: Res<Time>,
+    timeline: Res<LocalTimeline>,
 ) {
-    for (shooter, action, player_pos, yaw, pitch, attacker_id, is_predicted, is_interpolated) in player_query.iter() {
+    let tick = timeline.tick();
+    for (shooter, action, player_pos, yaw, pitch, attacker_id, mut cooldown, is_predicted, is_interpolated) in player_query.iter_mut() {
         if is_interpolated { continue; }
         if !action.just_pressed(&PlayerActions::Jab) { continue; }
 
-        let current = time.elapsed_secs();
-        if current - *last_jab < JAB_COOLDOWN {
+        if !cooldown.ready(tick) {
             continue;
         }
-        *last_jab = current;
+        cooldown.last_jab_tick = Some(tick);
 
         let eye_pos = player_pos.0 + Vec3::Y * 0.8;
         let ray_dir = Quat::from_euler(EulerRot::YXZ, yaw.0, pitch.0, 0.0) * Vec3::NEG_Z;
@@ -2476,5 +2527,70 @@ mod onchain_coupling_tests {
             "must equal the N burned into settle_death; changing it here does not \
              change the program"
         );
+    }
+}
+
+
+// ========================================
+// Melee cooldown
+// ========================================
+//
+// Pins the per-player cooldown rule that replaced a system-wide `Local<f32>`.
+// The old state was shared by every player (one global melee cooldown) and was
+// never rolled back.
+#[cfg(test)]
+mod jab_cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn first_jab_is_always_ready() {
+        assert!(JabCooldown::default().ready(Tick(100)));
+    }
+
+    #[test]
+    fn jab_is_blocked_until_the_cooldown_elapses() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(100)) };
+        assert!(!cd.ready(Tick(100)), "same tick must not re-fire");
+        assert!(!cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16 - 1)));
+        assert!(cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16)));
+        assert!(cd.ready(Tick(100 + JAB_COOLDOWN_TICKS as u16 + 50)));
+    }
+
+    /// The bug this replaced: two players sharing one cooldown. Separate
+    /// components must not influence each other.
+    #[test]
+    fn cooldowns_are_independent_per_player() {
+        let jabbed = JabCooldown { last_jab_tick: Some(Tick(100)) };
+        let fresh = JabCooldown::default();
+        assert!(!jabbed.ready(Tick(105)), "recent jabber is on cooldown");
+        assert!(fresh.ready(Tick(105)), "a different player must be unaffected");
+    }
+
+    /// On a rollback replay of a tick EARLIER than the recorded jab, elapsed is
+    /// negative. Handled permissively so a stale value can never permanently
+    /// stick a player's melee.
+    #[test]
+    fn replayed_tick_before_recorded_jab_is_permissive() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(200)) };
+        assert!(cd.ready(Tick(150)));
+    }
+
+    /// Tick is u16 and its subtraction wraps; the cooldown must stay correct
+    /// across the wrap rather than blocking for ~17 minutes of ticks.
+    #[test]
+    fn cooldown_survives_tick_wraparound() {
+        let cd = JabCooldown { last_jab_tick: Some(Tick(u16::MAX - 5)) };
+        // 10 ticks later, having wrapped past zero — still inside the cooldown.
+        assert!(!cd.ready(Tick(4)));
+        // A full cooldown past the wrap — ready again.
+        assert!(cd.ready(Tick(u16::MAX.wrapping_add(JAB_COOLDOWN_TICKS as u16))));
+    }
+
+    #[test]
+    fn cooldown_is_rounded_up_never_more_permissive_than_spec() {
+        // 0.4s at 64 Hz = 25.6 ticks; truncation would have given 25 (390ms).
+        assert_eq!(JAB_COOLDOWN_TICKS, 26);
+        let ms = JAB_COOLDOWN_TICKS as f32 / crate::FIXED_TIMESTEP_HZ as f32 * 1000.0;
+        assert!(ms >= 400.0, "authoritative limit must not be looser than 400ms");
     }
 }
