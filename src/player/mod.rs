@@ -77,8 +77,8 @@ pub fn select_spawn_point(living_positions: &[Vec3]) -> Vec3 {
 }
 
 /// Capsule dimensions (must match Collider in physics bundle)
-const CAPSULE_RADIUS: f32 = 0.5;
-const CAPSULE_HEIGHT: f32 = 1.0;
+pub const CAPSULE_RADIUS: f32 = 0.5;
+pub const CAPSULE_HEIGHT: f32 = 1.0;
 
 /// Surface normal must have Y > this to count as walkable ground (~45° max slope)
 const MIN_GROUND_NORMAL_Y: f32 = 0.7;

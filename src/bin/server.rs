@@ -77,7 +77,17 @@ fn main() {
     // to where targets were when the client saw them
     app.add_plugins(LagCompensationPlugin);
 
-    // World — physics only, no rendering on headless server
+    // World — physics only, no rendering on headless server.
+    // Geometry is validated BEFORE anything spawns: a server that refuses to
+    // boot is loud and recoverable, whereas one that boots with a spawn point
+    // buried in a collider swallows that player into a respawn loop they cannot
+    // escape. The same check runs as a unit test in CI; this catches anything
+    // that reaches a running server anyway.
+    app.add_systems(
+        Startup,
+        multiplayer::world::validation::assert_world_valid_on_startup
+            .before(spawn_world_physics),
+    );
     app.add_systems(Startup, spawn_world_physics);
     app.add_systems(Startup, spawn_server);
     app.add_systems(Startup, spawn_server_interactive_objects);

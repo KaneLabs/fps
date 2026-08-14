@@ -1,3 +1,5 @@
+pub mod validation;
+
 use avian3d::prelude::*;
 use bevy::camera::visibility::RenderLayers;
 use bevy::gltf::GltfAssetLabel;
@@ -342,207 +344,213 @@ const DOOR_INTERACT_DISTANCE: f32 = 4.0;
 ///   - Scattered supply crates, logs, rocky outcrops
 ///   - Uneven terrain with elevation changes
 ///   - Pine tree trunks throughout the perimeter
-pub fn spawn_world_physics(mut commands: Commands) {
-    // Helper for static collider spawning.
+pub fn world_blocks() -> Vec<WorldBlock> {
+    // Geometry is built as DATA first, then spawned. Keeping the collider set
+    // reachable without a running app is what lets `validation` check it in a
+    // plain unit test instead of only at server boot — see world::validation.
     //
     // With `AvianReplicationMode::Position`, avian treats `Position`/`Rotation`
     // as the source of truth — not `Transform`. The old code set Transform only,
     // so every world collider was effectively at the origin for physics purposes,
     // causing the player's dynamic body to fall through geometry stacked at
     // (0,0,0). Always set `Position` (and `Rotation` for the rotated variant).
-    let sc = |commands: &mut Commands, pos: Vec3, size: Vec3, friction: f32| {
-        commands.spawn((
-            Position::new(pos),
-            Rotation::default(),
-            RigidBody::Static,
-            Collider::cuboid(size.x, size.y, size.z),
-            Friction::new(friction),
-        ));
-    };
-    let sc_rot = |commands: &mut Commands, pos: Vec3, rot: Quat, size: Vec3, friction: f32| {
-        commands.spawn((
-            Position::new(pos),
-            Rotation(rot),
-            RigidBody::Static,
-            Collider::cuboid(size.x, size.y, size.z),
-            Friction::new(friction),
-        ));
-    };
+    let mut blocks: Vec<WorldBlock> = Vec::new();
+    // Section cursor. Reassigned at each section header below; every `sc!` call
+    // tags itself with whatever section it sits in.
+    let mut kind = BlockKind::Terrain;
+    macro_rules! sc {
+        ($pos:expr, $size:expr, $friction:expr) => {
+            blocks.push(WorldBlock { pos: $pos, size: $size, rot: Quat::IDENTITY, friction: $friction, kind })
+        };
+    }
+    macro_rules! sc_rot {
+        ($pos:expr, $rot:expr, $size:expr, $friction:expr) => {
+            blocks.push(WorldBlock { pos: $pos, size: $size, rot: $rot, friction: $friction, kind })
+        };
+    }
 
     // ========================================
     // TERRAIN — multi-level ground with rocky terrain
     // ========================================
+    kind = BlockKind::Terrain;
 
     // Main ground plane (slightly below 0 so terrain sits on top)
-    sc(&mut commands, Vec3::new(0.0, -0.05, -20.0), Vec3::new(120.0, 0.1, 120.0), 0.5);
+    sc!(Vec3::new(0.0, -0.05, -20.0), Vec3::new(120.0, 0.1, 120.0), 0.5);
 
     // Dirt clearing around cabin (slightly raised, packed earth)
-    sc(&mut commands, Vec3::new(0.0, 0.05, 0.0), Vec3::new(20.0, 0.1, 16.0), 0.4);
+    sc!(Vec3::new(0.0, 0.05, 0.0), Vec3::new(20.0, 0.1, 16.0), 0.4);
 
     // Eastern hillside (stepped terrain rising toward mine)
     // Ground level — full width but stops before mine tunnel entrance
-    sc(&mut commands, Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0), 0.6);
+    sc!(Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0), 0.6);
     // Mid-level — split to leave gap for mine entrance (tunnel is x=20.5-23.5, z=-2 to -10)
-    sc(&mut commands, Vec3::new(24.0, 1.5, -14.0), Vec3::new(8.0, 3.0, 6.0), 0.6);  // behind mine
-    sc(&mut commands, Vec3::new(27.0, 1.5, -4.0), Vec3::new(4.0, 3.0, 10.0), 0.6);  // right of mine
+    sc!(Vec3::new(24.0, 1.5, -14.0), Vec3::new(8.0, 3.0, 6.0), 0.6);  // behind mine
+    sc!(Vec3::new(27.0, 1.5, -4.0), Vec3::new(4.0, 3.0, 10.0), 0.6);  // right of mine
     // High ridge — far back
-    sc(&mut commands, Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0), 0.6);
+    sc!(Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0), 0.6);
 
     // Western ridge (gentle slope)
-    sc(&mut commands, Vec3::new(-20.0, 0.3, -10.0), Vec3::new(10.0, 0.6, 24.0), 0.5);
-    sc(&mut commands, Vec3::new(-26.0, 0.8, -10.0), Vec3::new(6.0, 1.6, 20.0), 0.5);
+    sc!(Vec3::new(-20.0, 0.3, -10.0), Vec3::new(10.0, 0.6, 24.0), 0.5);
+    sc!(Vec3::new(-26.0, 0.8, -10.0), Vec3::new(6.0, 1.6, 20.0), 0.5);
 
     // Northern rocky slope
-    sc(&mut commands, Vec3::new(0.0, 0.4, -28.0), Vec3::new(30.0, 0.8, 10.0), 0.6);
-    sc(&mut commands, Vec3::new(0.0, 1.2, -35.0), Vec3::new(25.0, 2.4, 8.0), 0.6);
+    sc!(Vec3::new(0.0, 0.4, -28.0), Vec3::new(30.0, 0.8, 10.0), 0.6);
+    sc!(Vec3::new(0.0, 1.2, -35.0), Vec3::new(25.0, 2.4, 8.0), 0.6);
 
     // Southern approach path (trail from the south)
-    sc(&mut commands, Vec3::new(0.0, 0.02, 14.0), Vec3::new(4.0, 0.04, 12.0), 0.3);
+    sc!(Vec3::new(0.0, 0.02, 14.0), Vec3::new(4.0, 0.04, 12.0), 0.3);
 
     // ========================================
     // MAIN CABIN — log cabin, 8x6m, with porch
     // ========================================
+    kind = BlockKind::Structure;
 
     // Cabin floor (raised wooden platform)
-    sc(&mut commands, Vec3::new(0.0, 0.3, 0.0), Vec3::new(8.0, 0.2, 6.0), 0.3);
+    sc!(Vec3::new(0.0, 0.3, 0.0), Vec3::new(8.0, 0.2, 6.0), 0.3);
 
     // Cabin walls — west
-    sc(&mut commands, Vec3::new(-4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
+    sc!(Vec3::new(-4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
     // Cabin walls — east
-    sc(&mut commands, Vec3::new(4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
+    sc!(Vec3::new(4.0, 1.7, 0.0), Vec3::new(0.4, 2.8, 6.0), 0.2);
     // Cabin walls — north (solid back wall)
-    sc_rot(&mut commands, Vec3::new(0.0, 1.7, -3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 8.0), 0.2);
+    sc_rot!(Vec3::new(0.0, 1.7, -3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 8.0), 0.2);
     // Cabin walls — south left (doorway gap 2.5m wide)
-    sc_rot(&mut commands, Vec3::new(-2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
+    sc_rot!(Vec3::new(-2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
     // Cabin walls — south right
-    sc_rot(&mut commands, Vec3::new(2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
+    sc_rot!(Vec3::new(2.75, 1.7, 3.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.4, 2.8, 2.5), 0.2);
 
     // Cabin roof (angled planks — simplified as flat slab)
-    sc(&mut commands, Vec3::new(0.0, 3.3, 0.0), Vec3::new(9.0, 0.2, 7.0), 0.2);
+    sc!(Vec3::new(0.0, 3.3, 0.0), Vec3::new(9.0, 0.2, 7.0), 0.2);
 
     // Front porch (extends south from cabin door)
-    sc(&mut commands, Vec3::new(0.0, 0.2, 5.5), Vec3::new(8.0, 0.15, 3.0), 0.3);
+    sc!(Vec3::new(0.0, 0.2, 5.5), Vec3::new(8.0, 0.15, 3.0), 0.3);
 
     // Porch railing — left
-    sc(&mut commands, Vec3::new(-3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
+    sc!(Vec3::new(-3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
     // Porch railing — right
-    sc(&mut commands, Vec3::new(3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
+    sc!(Vec3::new(3.9, 0.7, 5.5), Vec3::new(0.2, 0.8, 3.0), 0.2);
     // Porch railing — front
-    sc_rot(&mut commands, Vec3::new(0.0, 0.7, 7.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.2, 0.8, 8.0), 0.2);
+    sc_rot!(Vec3::new(0.0, 0.7, 7.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.2, 0.8, 8.0), 0.2);
 
     // Porch steps (2 steps down to ground)
-    sc(&mut commands, Vec3::new(0.0, 0.12, 7.5), Vec3::new(2.0, 0.12, 0.6), 0.3);
-    sc(&mut commands, Vec3::new(0.0, 0.06, 8.0), Vec3::new(2.0, 0.06, 0.6), 0.3);
+    sc!(Vec3::new(0.0, 0.12, 7.5), Vec3::new(2.0, 0.12, 0.6), 0.3);
+    sc!(Vec3::new(0.0, 0.06, 8.0), Vec3::new(2.0, 0.06, 0.6), 0.3);
 
     // Table inside cabin
-    sc(&mut commands, Vec3::new(0.0, 0.4, -1.0), Vec3::new(2.0, 0.8, 1.2), 0.2);
+    sc!(Vec3::new(0.0, 0.4, -1.0), Vec3::new(2.0, 0.8, 1.2), 0.2);
 
     // Fireplace / hearth on north wall (stone block)
-    sc(&mut commands, Vec3::new(0.0, 0.5, -2.5), Vec3::new(2.0, 1.0, 1.0), 0.4);
+    sc!(Vec3::new(0.0, 0.5, -2.5), Vec3::new(2.0, 1.0, 1.0), 0.4);
     // Chimney above fireplace
-    sc(&mut commands, Vec3::new(0.0, 3.0, -2.8), Vec3::new(1.2, 3.0, 1.2), 0.4);
+    sc!(Vec3::new(0.0, 3.0, -2.8), Vec3::new(1.2, 3.0, 1.2), 0.4);
 
     // ========================================
     // EQUIPMENT SHED — west of cabin, smaller structure
     // ========================================
+    kind = BlockKind::Structure;
 
     // Shed floor
-    sc(&mut commands, Vec3::new(-14.0, 0.15, 2.0), Vec3::new(5.0, 0.15, 4.0), 0.3);
+    sc!(Vec3::new(-14.0, 0.15, 2.0), Vec3::new(5.0, 0.15, 4.0), 0.3);
 
     // Shed walls — west
-    sc(&mut commands, Vec3::new(-16.5, 1.2, 2.0), Vec3::new(0.3, 2.4, 4.0), 0.2);
+    sc!(Vec3::new(-16.5, 1.2, 2.0), Vec3::new(0.3, 2.4, 4.0), 0.2);
     // Shed walls — east (open side — just posts)
-    sc(&mut commands, Vec3::new(-11.5, 1.2, 4.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
-    sc(&mut commands, Vec3::new(-11.5, 1.2, 0.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
+    sc!(Vec3::new(-11.5, 1.2, 4.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
+    sc!(Vec3::new(-11.5, 1.2, 0.0), Vec3::new(0.3, 2.4, 0.3), 0.2);
     // Shed walls — north
-    sc_rot(&mut commands, Vec3::new(-14.0, 1.2, 0.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 5.0), 0.2);
+    sc_rot!(Vec3::new(-14.0, 1.2, 0.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 5.0), 0.2);
     // Shed walls — south (with gap)
-    sc_rot(&mut commands, Vec3::new(-15.0, 1.2, 4.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 2.0), 0.2);
+    sc_rot!(Vec3::new(-15.0, 1.2, 4.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 2.4, 2.0), 0.2);
 
     // Shed roof (corrugated metal look — flat collider)
-    sc(&mut commands, Vec3::new(-14.0, 2.5, 2.0), Vec3::new(6.0, 0.1, 5.0), 0.2);
+    sc!(Vec3::new(-14.0, 2.5, 2.0), Vec3::new(6.0, 0.1, 5.0), 0.2);
 
     // Workbench inside shed
-    sc(&mut commands, Vec3::new(-15.0, 0.4, 1.5), Vec3::new(2.5, 0.8, 0.8), 0.2);
+    sc!(Vec3::new(-15.0, 0.4, 1.5), Vec3::new(2.5, 0.8, 0.8), 0.2);
 
     // ========================================
     // MINE ENTRANCE — carved into eastern hillside
     // ========================================
+    kind = BlockKind::Structure;
 
     // Mine tunnel floor (descending slightly into the hill)
-    sc(&mut commands, Vec3::new(22.0, 0.8, -6.0), Vec3::new(3.0, 0.1, 8.0), 0.4);
+    sc!(Vec3::new(22.0, 0.8, -6.0), Vec3::new(3.0, 0.1, 8.0), 0.4);
 
     // Mine tunnel left wall
-    sc(&mut commands, Vec3::new(20.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
+    sc!(Vec3::new(20.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
     // Mine tunnel right wall
-    sc(&mut commands, Vec3::new(23.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
+    sc!(Vec3::new(23.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
     // Mine tunnel ceiling
-    sc(&mut commands, Vec3::new(22.0, 3.65, -6.0), Vec3::new(3.0, 0.3, 8.0), 0.3);
+    sc!(Vec3::new(22.0, 3.65, -6.0), Vec3::new(3.0, 0.3, 8.0), 0.3);
 
     // Mine support beams (timber frames at intervals)
     for z_off in [-3.0, -6.0, -9.0] {
         // Left post
-        sc(&mut commands, Vec3::new(20.8, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
+        sc!(Vec3::new(20.8, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
         // Right post
-        sc(&mut commands, Vec3::new(23.2, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
+        sc!(Vec3::new(23.2, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
         // Cross beam
-        sc(&mut commands, Vec3::new(22.0, 3.45, z_off), Vec3::new(2.8, 0.25, 0.25), 0.2);
+        sc!(Vec3::new(22.0, 3.45, z_off), Vec3::new(2.8, 0.25, 0.25), 0.2);
     }
 
     // Mine entrance overhang (rock face)
-    sc(&mut commands, Vec3::new(22.0, 3.5, -2.0), Vec3::new(5.0, 1.0, 2.0), 0.5);
+    sc!(Vec3::new(22.0, 3.5, -2.0), Vec3::new(5.0, 1.0, 2.0), 0.5);
 
     // ========================================
     // SUPPLY CRATES & BARRELS — scattered around compound
     // ========================================
+    kind = BlockKind::Prop;
 
     // Crate stack near shed
-    sc(&mut commands, Vec3::new(-12.0, 0.4, 4.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
-    sc(&mut commands, Vec3::new(-12.0, 1.0, 4.0), Vec3::new(0.8, 0.4, 0.8), 0.3);
-    sc(&mut commands, Vec3::new(-11.0, 0.3, 3.5), Vec3::new(0.6, 0.6, 0.6), 0.3);
+    sc!(Vec3::new(-12.0, 0.4, 4.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
+    sc!(Vec3::new(-12.0, 1.0, 4.0), Vec3::new(0.8, 0.4, 0.8), 0.3);
+    sc!(Vec3::new(-11.0, 0.3, 3.5), Vec3::new(0.6, 0.6, 0.6), 0.3);
 
     // Crates near cabin porch
-    sc(&mut commands, Vec3::new(5.5, 0.35, 6.0), Vec3::new(1.2, 0.7, 0.8), 0.3);
-    sc(&mut commands, Vec3::new(6.5, 0.25, 5.5), Vec3::new(0.5, 0.5, 0.5), 0.3);
+    sc!(Vec3::new(5.5, 0.35, 6.0), Vec3::new(1.2, 0.7, 0.8), 0.3);
+    sc!(Vec3::new(6.5, 0.25, 5.5), Vec3::new(0.5, 0.5, 0.5), 0.3);
 
     // Barrel cluster south of cabin
-    sc(&mut commands, Vec3::new(-3.0, 0.5, 8.0), Vec3::new(0.7, 1.0, 0.7), 0.3);
-    sc(&mut commands, Vec3::new(-2.0, 0.5, 8.5), Vec3::new(0.7, 1.0, 0.7), 0.3);
-    sc(&mut commands, Vec3::new(-2.5, 0.5, 9.2), Vec3::new(0.7, 1.0, 0.7), 0.3);
+    sc!(Vec3::new(-3.0, 0.5, 8.0), Vec3::new(0.7, 1.0, 0.7), 0.3);
+    sc!(Vec3::new(-2.0, 0.5, 8.5), Vec3::new(0.7, 1.0, 0.7), 0.3);
+    sc!(Vec3::new(-2.5, 0.5, 9.2), Vec3::new(0.7, 1.0, 0.7), 0.3);
 
     // Crate near mine entrance
-    sc(&mut commands, Vec3::new(19.5, 1.2, -3.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
+    sc!(Vec3::new(19.5, 1.2, -3.0), Vec3::new(1.0, 0.8, 1.0), 0.3);
 
     // ========================================
     // ROCKY OUTCROPS & BOULDERS
     // ========================================
+    kind = BlockKind::Terrain;
 
     // Large boulder cluster — northwest
-    sc(&mut commands, Vec3::new(-10.0, 0.7, -15.0), Vec3::new(3.0, 1.4, 2.5), 0.7);
-    sc(&mut commands, Vec3::new(-8.5, 0.4, -13.5), Vec3::new(1.8, 0.8, 1.5), 0.7);
-    sc_rot(&mut commands, Vec3::new(-11.5, 0.5, -14.0), Quat::from_rotation_y(0.4), Vec3::new(2.0, 1.0, 1.5), 0.7);
+    sc!(Vec3::new(-10.0, 0.7, -15.0), Vec3::new(3.0, 1.4, 2.5), 0.7);
+    sc!(Vec3::new(-8.5, 0.4, -13.5), Vec3::new(1.8, 0.8, 1.5), 0.7);
+    sc_rot!(Vec3::new(-11.5, 0.5, -14.0), Quat::from_rotation_y(0.4), Vec3::new(2.0, 1.0, 1.5), 0.7);
 
     // Rocky ridge — northeast (natural cover)
-    sc_rot(&mut commands, Vec3::new(12.0, 0.6, -16.0), Quat::from_rotation_y(0.3), Vec3::new(4.0, 1.2, 1.5), 0.7);
-    sc(&mut commands, Vec3::new(14.0, 0.4, -14.0), Vec3::new(2.0, 0.8, 2.0), 0.7);
-    sc_rot(&mut commands, Vec3::new(10.0, 0.3, -18.0), Quat::from_rotation_y(-0.2), Vec3::new(2.5, 0.6, 1.5), 0.7);
+    sc_rot!(Vec3::new(12.0, 0.6, -16.0), Quat::from_rotation_y(0.3), Vec3::new(4.0, 1.2, 1.5), 0.7);
+    sc!(Vec3::new(14.0, 0.4, -14.0), Vec3::new(2.0, 0.8, 2.0), 0.7);
+    sc_rot!(Vec3::new(10.0, 0.3, -18.0), Quat::from_rotation_y(-0.2), Vec3::new(2.5, 0.6, 1.5), 0.7);
 
     // Scattered mid-field boulders (cover points)
-    sc_rot(&mut commands, Vec3::new(7.0, 0.45, -5.0), Quat::from_rotation_y(0.7), Vec3::new(1.8, 0.9, 1.2), 0.7);
-    sc(&mut commands, Vec3::new(-6.0, 0.35, -8.0), Vec3::new(1.5, 0.7, 1.5), 0.7);
-    sc_rot(&mut commands, Vec3::new(3.0, 0.3, -20.0), Quat::from_rotation_y(1.1), Vec3::new(2.0, 0.6, 1.0), 0.7);
+    sc_rot!(Vec3::new(7.0, 0.45, -5.0), Quat::from_rotation_y(0.7), Vec3::new(1.8, 0.9, 1.2), 0.7);
+    sc!(Vec3::new(-6.0, 0.35, -8.0), Vec3::new(1.5, 0.7, 1.5), 0.7);
+    sc_rot!(Vec3::new(3.0, 0.3, -20.0), Quat::from_rotation_y(1.1), Vec3::new(2.0, 0.6, 1.0), 0.7);
 
     // ========================================
     // FALLEN LOGS (natural cover & obstacles)
     // ========================================
+    kind = BlockKind::Prop;
 
-    sc_rot(&mut commands, Vec3::new(-5.0, 0.25, -12.0), Quat::from_rotation_y(0.6), Vec3::new(0.4, 0.4, 5.0), 0.4);
-    sc_rot(&mut commands, Vec3::new(8.0, 0.3, -22.0), Quat::from_rotation_y(-0.8), Vec3::new(0.5, 0.5, 6.0), 0.4);
-    sc_rot(&mut commands, Vec3::new(-8.0, 0.2, 5.0), Quat::from_rotation_y(1.2), Vec3::new(0.35, 0.35, 4.0), 0.4);
+    sc_rot!(Vec3::new(-5.0, 0.25, -12.0), Quat::from_rotation_y(0.6), Vec3::new(0.4, 0.4, 5.0), 0.4);
+    sc_rot!(Vec3::new(8.0, 0.3, -22.0), Quat::from_rotation_y(-0.8), Vec3::new(0.5, 0.5, 6.0), 0.4);
+    sc_rot!(Vec3::new(-8.0, 0.2, 5.0), Quat::from_rotation_y(1.2), Vec3::new(0.35, 0.35, 4.0), 0.4);
 
     // ========================================
     // PINE TREE TRUNKS (collision cylinders approximated as cuboids)
     // ========================================
+    kind = BlockKind::Terrain;
 
     let tree_positions = [
         Vec3::new(-18.0, 2.0, -18.0), Vec3::new(-15.0, 2.0, -22.0),
@@ -557,39 +565,42 @@ pub fn spawn_world_physics(mut commands: Commands) {
     ];
 
     for pos in tree_positions {
-        sc(&mut commands, pos, Vec3::new(0.6, 4.0, 0.6), 0.3);
+        sc!(pos, Vec3::new(0.6, 4.0, 0.6), 0.3);
     }
 
     // ========================================
     // WATCHTOWER — elevated platform NW of cabin
     // ========================================
+    kind = BlockKind::Structure;
 
     // Four posts
     for (x, z) in [(-9.0, -6.0), (-9.0, -9.0), (-6.0, -6.0), (-6.0, -9.0)] {
-        sc(&mut commands, Vec3::new(x, 2.0, z), Vec3::new(0.3, 4.0, 0.3), 0.3);
+        sc!(Vec3::new(x, 2.0, z), Vec3::new(0.3, 4.0, 0.3), 0.3);
     }
     // Platform
-    sc(&mut commands, Vec3::new(-7.5, 3.8, -7.5), Vec3::new(4.0, 0.2, 4.0), 0.3);
+    sc!(Vec3::new(-7.5, 3.8, -7.5), Vec3::new(4.0, 0.2, 4.0), 0.3);
     // Ladder (angled plank)
-    sc_rot(&mut commands, Vec3::new(-5.5, 1.9, -7.5), Quat::from_rotation_z(0.5), Vec3::new(0.5, 0.15, 1.0), 0.4);
+    sc_rot!(Vec3::new(-5.5, 1.9, -7.5), Quat::from_rotation_z(0.5), Vec3::new(0.5, 0.15, 1.0), 0.4);
 
     // Half-walls on watchtower (cover)
-    sc(&mut commands, Vec3::new(-9.2, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
-    sc(&mut commands, Vec3::new(-5.8, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
-    sc_rot(&mut commands, Vec3::new(-7.5, 4.4, -9.2), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.15, 1.0, 4.0), 0.2);
+    sc!(Vec3::new(-9.2, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
+    sc!(Vec3::new(-5.8, 4.4, -7.5), Vec3::new(0.15, 1.0, 4.0), 0.2);
+    sc_rot!(Vec3::new(-7.5, 4.4, -9.2), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.15, 1.0, 4.0), 0.2);
 
     // ========================================
     // OLD PICKUP TRUCK (rusted, south-east of cabin)
     // ========================================
+    kind = BlockKind::Prop;
 
     // Truck body
-    sc_rot(&mut commands, Vec3::new(10.0, 0.6, 3.0), Quat::from_rotation_y(0.3), Vec3::new(2.5, 1.2, 5.0), 0.3);
+    sc_rot!(Vec3::new(10.0, 0.6, 3.0), Quat::from_rotation_y(0.3), Vec3::new(2.5, 1.2, 5.0), 0.3);
     // Truck cab (raised section)
-    sc_rot(&mut commands, Vec3::new(10.0, 1.5, 1.5), Quat::from_rotation_y(0.3), Vec3::new(2.3, 1.0, 2.5), 0.3);
+    sc_rot!(Vec3::new(10.0, 1.5, 1.5), Quat::from_rotation_y(0.3), Vec3::new(2.3, 1.0, 2.5), 0.3);
 
     // ========================================
     // CAMPFIRE RING — south of cabin (social area)
     // ========================================
+    kind = BlockKind::Prop;
 
     // Stone ring (8 small blocks in a circle)
     let ring_center = Vec3::new(3.0, 0.0, 10.0);
@@ -598,15 +609,119 @@ pub fn spawn_world_physics(mut commands: Commands) {
         let r = 1.2;
         let x = ring_center.x + angle.cos() * r;
         let z = ring_center.z + angle.sin() * r;
-        sc(&mut commands, Vec3::new(x, 0.15, z), Vec3::new(0.4, 0.3, 0.4), 0.7);
+        sc!(Vec3::new(x, 0.15, z), Vec3::new(0.4, 0.3, 0.4), 0.7);
     }
 
     // Log seats around campfire
-    sc_rot(&mut commands, Vec3::new(1.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
-    sc_rot(&mut commands, Vec3::new(5.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
-    sc_rot(&mut commands, Vec3::new(3.0, 0.2, 12.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 0.3, 1.8), 0.4);
+    sc_rot!(Vec3::new(1.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
+    sc_rot!(Vec3::new(5.0, 0.2, 10.0), Quat::from_rotation_y(0.0), Vec3::new(0.3, 0.3, 1.8), 0.4);
+    sc_rot!(Vec3::new(3.0, 0.2, 12.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.3, 0.3, 1.8), 0.4);
 
-    info!("Server: spawned Colorado wilderness compound physics colliders");
+    blocks
+}
+
+/// Spawns the static world colliders. Pure consumer of `world_blocks()` — all
+/// geometry lives there so it can be validated without an app.
+pub fn spawn_world_physics(mut commands: Commands) {
+    let blocks = world_blocks();
+    let n = blocks.len();
+    for b in blocks {
+        commands.spawn((
+            Position::new(b.pos),
+            Rotation(b.rot),
+            RigidBody::Static,
+            Collider::cuboid(b.size.x, b.size.y, b.size.z),
+            Friction::new(b.friction),
+        ));
+    }
+    info!("Server: spawned {n} Colorado wilderness compound physics colliders");
+}
+
+/// Which part of the map a collider belongs to.
+///
+/// Only `Terrain` participates in the interior-intrusion check: a structure's
+/// own walls necessarily bound its interior, and props (crates, workbenches,
+/// mine support beams) legitimately sit inside rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// Landscape: ground planes, hillsides, boulders, tree trunks.
+    Terrain,
+    /// Built geometry: cabin, shed, mine tunnel, watchtower.
+    Structure,
+    /// Scenery sitting on or in the above.
+    Prop,
+}
+
+/// A static world collider as DATA, so geometry can be validated without an app.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldBlock {
+    pub pos: Vec3,
+    /// FULL extents. `Collider::cuboid` takes full lengths and halves them
+    /// internally (avian3d parry/mod.rs: `SharedShape::cuboid(x * 0.5, ...)`),
+    /// so half-extents are `size * 0.5`. Getting this backwards doubles every
+    /// box and is the single easiest way to make this whole module lie.
+    pub size: Vec3,
+    pub rot: Quat,
+    pub friction: f32,
+    pub kind: BlockKind,
+}
+
+/// Axis-aligned bounding box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl Aabb {
+    pub fn from_center_size(center: Vec3, size: Vec3) -> Self {
+        let half = size * 0.5;
+        Self { min: center - half, max: center + half }
+    }
+
+    /// Strict overlap — touching faces do NOT count, so a wall flush against
+    /// the edge of the room it encloses is not reported as intruding into it.
+    pub fn overlaps(&self, other: &Aabb) -> bool {
+        self.min.x < other.max.x && self.max.x > other.min.x
+            && self.min.y < other.max.y && self.max.y > other.min.y
+            && self.min.z < other.max.z && self.max.z > other.min.z
+    }
+
+    /// Size of the overlapping region, or None if they do not overlap.
+    pub fn overlap_extent(&self, other: &Aabb) -> Option<Vec3> {
+        self.overlaps(other).then(|| {
+            Vec3::new(
+                (self.max.x.min(other.max.x) - self.min.x.max(other.min.x)).max(0.0),
+                (self.max.y.min(other.max.y) - self.min.y.max(other.min.y)).max(0.0),
+                (self.max.z.min(other.max.z) - self.min.z.max(other.min.z)).max(0.0),
+            )
+        })
+    }
+}
+
+impl WorldBlock {
+    /// World-space AABB. For rotated blocks this is the AABB of the rotated
+    /// box, which OVER-approximates. That is the safe direction for an
+    /// intrusion check (it can over-report, never miss).
+    pub fn aabb(&self) -> Aabb {
+        if self.rot == Quat::IDENTITY {
+            return Aabb::from_center_size(self.pos, self.size);
+        }
+        let half = self.size * 0.5;
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { -half.x } else { half.x },
+                if i & 2 == 0 { -half.y } else { half.y },
+                if i & 4 == 0 { -half.z } else { half.z },
+            );
+            let p = self.pos + self.rot * corner;
+            min = min.min(p);
+            max = max.max(p);
+        }
+        Aabb { min, max }
+    }
 }
 
 /// Client-only: spawns static world geometry with rendering + physics.
