@@ -38,8 +38,17 @@ pub const SPAWN_POINTS: &[Vec3] = &[
     Vec3::new(19.0, 1.5, -2.0),    // Outside mine entrance
     Vec3::new(-7.5, 4.8, -7.5),    // Watchtower platform
     Vec3::new(3.0, 1.0, 10.0),     // Campfire area
-    Vec3::new(-10.0, 1.5, -15.0),  // NW boulder cluster
-    Vec3::new(12.0, 1.5, -16.0),   // NE rocky ridge
+    // NOTE: both rock spawns sit ON boulders. The capsule is 2.0m tall
+    // (CAPSULE_HEIGHT 1.0 + 2 * CAPSULE_RADIUS 0.5), so its CENTER must be at
+    // least 1.0m above the surface or the player spawns embedded in the
+    // collider — and `ignore_origin_penetration: true` on every controller
+    // shape cast means a penetrating capsule is BLIND to the geometry it is
+    // inside: it reads as airborne, sinks through the world, hits the kill
+    // plane, respawns at the same point, and loops forever.
+    // NW boulder cluster: rock at y=0.7 half-extent 1.4 -> top 2.1 -> min 3.1
+    Vec3::new(-10.0, 3.3, -15.0),  // NW boulder cluster (above rock top 2.1)
+    // NE rocky ridge: rock at y=0.6 half-extent 1.2 -> top 1.8 -> min 2.8
+    Vec3::new(12.0, 3.0, -16.0),   // NE rocky ridge (above rock top 1.8)
     Vec3::new(10.0, 2.0, 3.0),     // Near the old truck
 ];
 
