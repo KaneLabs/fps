@@ -47,10 +47,24 @@ pub const PENETRATION_TOLERANCE: f32 = 0.001;
 /// with it and the check still passes. A declared volume is a statement of
 /// INTENT that geometry is checked against, which is the direction that catches
 /// the wall moving.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct InteriorVolume {
     pub name: &'static str,
     pub aabb: Aabb,
+    /// Where a player enters. Flood fill starts here.
+    pub entrance: Vec3,
+    /// Named FLOOR positions a player must be able to reach from `entrance`.
+    ///
+    /// These are places a player stands, NOT the coordinates of the thing they
+    /// are reaching for — you stand beside a workbench, not inside it. Pointing
+    /// one of these at an object's own position makes it permanently
+    /// unreachable and the check permanently red.
+    ///
+    /// This is the intent the passability check enforces. "Terrain has not
+    /// leaked in" is a proxy; "a player can get from the door to the ore" is
+    /// the actual requirement, and only the second one notices a support beam
+    /// 12cm too low or a crate parked in a doorway.
+    pub must_reach: Vec<(&'static str, Vec3)>,
 }
 
 /// Interior volumes that terrain must never intrude into.
@@ -66,6 +80,9 @@ pub fn interior_volumes() -> Vec<InteriorVolume> {
             // Ceiling pos(22, 3.65, -6) size(3, 0.3, 8) -> underside y=3.50
             // (raised in 639ebaf along with the crossbeams to open the tunnel)
             name: "mine tunnel",
+            // Just inside the mouth, and the ore vein at the dead end.
+            entrance: Vec3::new(22.0, 2.0, -2.5),
+            must_reach: vec![("floor by the ore vein", Vec3::new(22.0, 2.0, -9.0))],
             aabb: Aabb {
                 min: Vec3::new(20.7, 0.85, -10.0),
                 max: Vec3::new(23.3, 3.50, -2.0),
@@ -77,6 +94,10 @@ pub fn interior_volumes() -> Vec<InteriorVolume> {
             // North/south walls at z=-3 / z=3, 0.4 thick -> inner faces -2.8 / 2.8
             // Roof pos(0, 3.3, 0) size(9, 0.2, 7) -> underside y=3.2
             name: "cabin",
+            // Doorway gap in the south wall, and the table the AK47 sits on.
+            entrance: Vec3::new(0.0, 1.0, 2.5),
+            // NOT the centreline: a table, a bench and the fireplace run down it.
+            must_reach: vec![("open floor, back right", Vec3::new(2.5, 1.4, -2.0))],
             aabb: Aabb {
                 min: Vec3::new(-3.8, 0.4, -2.8),
                 max: Vec3::new(3.8, 3.2, 2.8),
@@ -90,6 +111,9 @@ pub fn interior_volumes() -> Vec<InteriorVolume> {
             // East side is open posts; south has a gap. Volume stops at the
             // floor's own extent rather than guessing where "outside" begins.
             name: "equipment shed",
+            // Open east side, and the workbench the pickaxe sits on.
+            entrance: Vec3::new(-12.0, 1.0, 2.0),
+            must_reach: vec![("floor by the workbench", Vec3::new(-14.0, 1.2, 2.6))],
             aabb: Aabb {
                 min: Vec3::new(-16.35, 0.225, 0.15),
                 max: Vec3::new(-11.65, 2.45, 4.0),
@@ -138,6 +162,167 @@ pub const KNOWN_VIOLATIONS: &[&str] = &[
     "interior:equipment shed:block(-20.00,0.30,-10.00)",
 ];
 
+
+// ========================================
+// Passability
+// ========================================
+
+/// Grid resolution for the passability flood fill, in metres.
+///
+/// 10cm: fine enough that a gap a player could actually squeeze through is not
+/// missed, coarse enough that a whole volume is a few thousand cells.
+pub const PASSABILITY_RESOLUTION: f32 = 0.1;
+
+/// Vertical interval, used for occupancy maths.
+#[derive(Debug, Clone, Copy)]
+struct Interval {
+    lo: f32,
+    hi: f32,
+}
+
+/// Spine-centre heights forbidden at column `(x, z)` by a single block.
+///
+/// Exact for an axis-aligned box against a VERTICAL capsule. The capsule is a
+/// segment of length CAPSULE_HEIGHT with radius CAPSULE_RADIUS, so it collides
+/// with box B iff `dist(segment, B) < r`. That distance separates cleanly:
+///
+///     dist^2 = dxz^2 + dy^2
+///
+/// where `dxz` is the horizontal distance from the column to B's xz-rect and
+/// `dy` the vertical distance from the spine interval to B's y-interval. So a
+/// block only constrains this column when `dxz < r`, and then it forbids spine
+/// centres within `h = sqrt(r^2 - dxz^2)` of B's y-range (plus half the spine).
+///
+/// Rotated blocks are handled via their AABB, which over-approximates — the
+/// safe direction, since it can only report a passage as blocked, never open.
+fn forbidden_spine_interval(x: f32, z: f32, b: &Aabb) -> Option<Interval> {
+    let dx = (b.min.x - x).max(x - b.max.x).max(0.0);
+    let dz = (b.min.z - z).max(z - b.max.z).max(0.0);
+    let dxz_sq = dx * dx + dz * dz;
+    let r_sq = CAPSULE_RADIUS * CAPSULE_RADIUS;
+    if dxz_sq >= r_sq {
+        return None;
+    }
+    let h = (r_sq - dxz_sq).sqrt();
+    let half_spine = CAPSULE_HEIGHT * 0.5;
+    // Shrunk by PENETRATION_TOLERANCE at both ends for the same reason the spawn
+    // check needed it: a capsule STANDING on a surface touches it exactly, and
+    // an interval that forbids the touching case declares every floor unstandable.
+    Some(Interval {
+        lo: b.min.y - half_spine - h + PENETRATION_TOLERANCE,
+        hi: b.max.y + half_spine + h - PENETRATION_TOLERANCE,
+    })
+}
+
+/// Can a capsule stand somewhere in this column, within `y_range`?
+fn column_is_passable(x: f32, z: f32, y_range: Interval, blocks: &[Aabb]) -> bool {
+    let mut forbidden: Vec<Interval> = blocks
+        .iter()
+        .filter_map(|b| forbidden_spine_interval(x, z, b))
+        .collect();
+    forbidden.sort_by(|a, b| a.lo.partial_cmp(&b.lo).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Walk the free gaps between merged forbidden intervals.
+    let mut cursor = y_range.lo;
+    for f in &forbidden {
+        if f.lo > cursor {
+            return true; // a free gap exists below this obstacle
+        }
+        cursor = cursor.max(f.hi);
+        if cursor >= y_range.hi {
+            return false;
+        }
+    }
+    cursor < y_range.hi
+}
+
+/// Result of flood-filling a volume from its entrance.
+///
+/// LIMITATION: this models whether a capsule can OCCUPY connected columns, not
+/// whether a player can climb between them. A low obstacle with headroom above
+/// reads as passable even though STEP_HEIGHT is only 0.1m. Real seals have a
+/// lintel or ceiling close above, so this is adequate for detecting them — but
+/// a green result means "no capsule-height barrier spans the route", not "fully
+/// reachable". See `known_limitation_low_obstacle_reads_as_passable`.
+pub struct Passability {
+    pub reachable: Vec<(&'static str, Vec3, bool)>,
+    pub entrance_usable: bool,
+}
+
+/// Flood fill the volume from `entrance` over columns a capsule can occupy.
+pub fn check_passability(volume: &InteriorVolume, blocks: &[WorldBlock]) -> Passability {
+    let aabbs: Vec<Aabb> = blocks.iter().map(|b| b.aabb()).collect();
+    let res = PASSABILITY_RESOLUTION;
+    // Include the entrance even when it sits just outside the declared volume.
+    let min_x = volume.aabb.min.x.min(volume.entrance.x);
+    let max_x = volume.aabb.max.x.max(volume.entrance.x);
+    let min_z = volume.aabb.min.z.min(volume.entrance.z);
+    let max_z = volume.aabb.max.z.max(volume.entrance.z);
+    let nx = ((max_x - min_x) / res).ceil() as usize + 1;
+    let nz = ((max_z - min_z) / res).ceil() as usize + 1;
+    // Spine centres must keep the WHOLE capsule inside the volume's height.
+    // The capsule extends CAPSULE_TOTAL_HEIGHT/2 above and below its centre —
+    // not CAPSULE_RADIUS. Getting this wrong lets a check "pass" a volume too
+    // short to stand up in.
+    let half_capsule = CAPSULE_TOTAL_HEIGHT * 0.5;
+    let y_range = Interval {
+        lo: volume.aabb.min.y + half_capsule,
+        hi: volume.aabb.max.y - half_capsule,
+    };
+
+    let idx = |ix: usize, iz: usize| iz * nx + ix;
+    let mut passable = vec![false; nx * nz];
+    for iz in 0..nz {
+        for ix in 0..nx {
+            let x = min_x + ix as f32 * res;
+            let z = min_z + iz as f32 * res;
+            passable[idx(ix, iz)] = column_is_passable(x, z, y_range, &aabbs);
+        }
+    }
+
+    let to_cell = |p: Vec3| {
+        let ix = (((p.x - min_x) / res).round() as isize).clamp(0, nx as isize - 1) as usize;
+        let iz = (((p.z - min_z) / res).round() as isize).clamp(0, nz as isize - 1) as usize;
+        (ix, iz)
+    };
+
+    let (sx, sz) = to_cell(volume.entrance);
+    let entrance_usable = passable[idx(sx, sz)];
+
+    let mut seen = vec![false; nx * nz];
+    if entrance_usable {
+        let mut stack = vec![(sx, sz)];
+        seen[idx(sx, sz)] = true;
+        while let Some((cx, cz)) = stack.pop() {
+            let neighbours = [
+                (cx.wrapping_sub(1), cz), (cx + 1, cz),
+                (cx, cz.wrapping_sub(1)), (cx, cz + 1),
+            ];
+            for (nx_, nz_) in neighbours {
+                if nx_ >= nx || nz_ >= nz {
+                    continue;
+                }
+                let i = idx(nx_, nz_);
+                if passable[i] && !seen[i] {
+                    seen[i] = true;
+                    stack.push((nx_, nz_));
+                }
+            }
+        }
+    }
+
+    let reachable = volume
+        .must_reach
+        .iter()
+        .map(|(name, p)| {
+            let (tx, tz) = to_cell(*p);
+            (*name, *p, seen[idx(tx, tz)])
+        })
+        .collect();
+
+    Passability { reachable, entrance_usable }
+}
+
 /// A geometry defect found by validation.
 #[derive(Debug, Clone)]
 pub enum Violation {
@@ -149,6 +334,24 @@ pub enum Violation {
             /// How far the capsule body is inside the block, in metres.
         /// SATURATES at CAPSULE_RADIUS — see the note in the boulder test.
         penetration: f32,
+    },
+    /// A point players must be able to reach cannot be reached from the entrance.
+    Unreachable {
+        volume: &'static str,
+        target: &'static str,
+        at: Vec3,
+    },
+    /// A declared target is not a standable spot at all — an authoring error in
+    /// `must_reach`, not a map defect.
+    TargetNotStandable {
+        volume: &'static str,
+        target: &'static str,
+        at: Vec3,
+    },
+    /// The entrance itself is blocked — nobody can get in at all.
+    EntranceBlocked {
+        volume: &'static str,
+        at: Vec3,
     },
     /// A terrain block reaches into a space players must be able to occupy.
     InteriorIntruded {
@@ -169,6 +372,13 @@ impl Violation {
                 "spawn:{index}:block({:.2},{:.2},{:.2})",
                 block.pos.x, block.pos.y, block.pos.z
             ),
+            Violation::Unreachable { volume, target, .. } => {
+                format!("unreachable:{volume}:{target}")
+            }
+            Violation::TargetNotStandable { volume, target, .. } => {
+                format!("target-not-standable:{volume}:{target}")
+            }
+            Violation::EntranceBlocked { volume, .. } => format!("entrance:{volume}"),
             Violation::InteriorIntruded { volume, block, .. } => format!(
                 "interior:{volume}:block({:.2},{:.2},{:.2})",
                 block.pos.x, block.pos.y, block.pos.z
@@ -207,6 +417,58 @@ impl Violation {
                     CAPSULE_TOTAL_HEIGHT * 0.5,
                 )
             }
+            Violation::Unreachable { volume, target, at } => format!(
+                "THE {} IS SEALED: '{target}' AT {at:?} CANNOT BE REACHED.\n\
+                 \n\
+                 A {CAPSULE_TOTAL_HEIGHT}m player capsule cannot travel from the \
+                 entrance to this point through any route inside the volume.\n\
+                 \n\
+                 CONSEQUENCE: whatever is there is unreachable in game. This is \
+                 what players describe as 'closed on all sides' — and it does NOT \
+                 require anything to look wrong. The tunnel that shipped this way \
+                 was blocked by support beams 12cm too low, which is invisible in \
+                 code and invisible on screen until you walk into it.\n\
+                 \n\
+                 FIX EITHER WAY:\n\
+                 1. Open the route — raise or move whatever blocks it. Run\n\
+                    `cargo test --lib tunnel_report -- --nocapture --ignored`\n\
+                    to list every block inside the volume with its exact spans.\n\
+                 2. If this point is not meant to be reachable, remove it from \
+                    `must_reach` and say why. It is a statement of intent.",
+                volume.to_uppercase(),
+            ),
+            Violation::TargetNotStandable { volume, target, at } => format!(
+                "MUST-REACH TARGET '{target}' IN THE {} IS NOT A STANDABLE SPOT.\n\
+                 \n\
+                 A {CAPSULE_TOTAL_HEIGHT}m capsule cannot occupy {at:?} at ALL, \
+                 regardless of routing — so this is an authoring error in \
+                 `must_reach`, NOT a sealed room.\n\
+                 \n\
+                 The distinction matters: without it, a target accidentally placed \
+                 inside a table, a fireplace or a workbench reports as 'THE ROOM IS \
+                 SEALED' and sends someone hunting a blockage that does not exist. \
+                 (That happened three times while writing this module.)\n\
+                 \n\
+                 FIX: move the target to open floor NEAR the thing it represents. \
+                 These are places a player STANDS, not the coordinates of the \
+                 object they are reaching for. Run\n\
+                 `cargo test --lib volume_report -- --nocapture --ignored`\n\
+                 to see every block inside the volume with its exact spans.",
+                volume.to_uppercase(),
+            ),
+            Violation::EntranceBlocked { volume, at } => format!(
+                "THE {} ENTRANCE AT {at:?} IS BLOCKED.\n\
+                 \n\
+                 A {CAPSULE_TOTAL_HEIGHT}m capsule cannot occupy the entrance \
+                 column at all, so nobody can get in and every reachability check \
+                 for this volume is vacuous.\n\
+                 \n\
+                 FIX EITHER WAY:\n\
+                 1. Clear the doorway.\n\
+                 2. If the declared entrance is simply in the wrong place, move it \
+                    — a wrong entrance makes this check silently test nothing.",
+                volume.to_uppercase(),
+            ),
             Violation::InteriorIntruded { volume, block, overlap } => {
                 let b = block.aabb();
                 format!(
@@ -301,6 +563,45 @@ pub fn validate_world(blocks: &[WorldBlock]) -> Vec<Violation> {
     // 2. No TERRAIN block may reach into a declared interior volume.
     //    Structures bound their own interiors and props legitimately sit inside
     //    them, so only landscape participates.
+    // 3. Every interior must actually be TRAVERSABLE — against ALL blocks,
+    //    regardless of kind. The intrusion check below is a proxy that a
+    //    kind-filter makes blind: it passed a mine tunnel that was sealed by its
+    //    own (Structure) support beams. This asks the question we care about.
+    for volume in interior_volumes() {
+        let p = check_passability(&volume, blocks);
+        if !p.entrance_usable {
+            violations.push(Violation::EntranceBlocked {
+                volume: volume.name,
+                at: volume.entrance,
+            });
+        }
+        let aabbs: Vec<Aabb> = blocks.iter().map(|b| b.aabb()).collect();
+        let half_capsule = CAPSULE_TOTAL_HEIGHT * 0.5;
+        let y_range = Interval {
+            lo: volume.aabb.min.y + half_capsule,
+            hi: volume.aabb.max.y - half_capsule,
+        };
+        for (target, at, reached) in p.reachable {
+            if reached {
+                continue;
+            }
+            // Separate "the target is inside furniture" from "the room is sealed".
+            if !column_is_passable(at.x, at.z, y_range, &aabbs) {
+                violations.push(Violation::TargetNotStandable {
+                    volume: volume.name,
+                    target,
+                    at,
+                });
+            } else {
+                violations.push(Violation::Unreachable {
+                    volume: volume.name,
+                    target,
+                    at,
+                });
+            }
+        }
+    }
+
     for volume in interior_volumes() {
         for block in blocks.iter().filter(|b| b.kind == BlockKind::Terrain) {
             if let Some(overlap) = block.aabb().overlap_extent(&volume.aabb) {
@@ -417,6 +718,200 @@ mod tests {
         );
     }
 
+
+    /// Reconstructs the mine tunnel EXACTLY as it shipped (before 639ebaf) and
+    /// asserts the passability check would have caught it.
+    ///
+    /// This is the whole justification for the check existing. The interior
+    /// intrusion check in the same module reported this tunnel as FINE, because
+    /// the blockage was the tunnel's own support beams — Structure kind, which
+    /// that check deliberately excludes. Green tick, sealed tunnel.
+    #[test]
+    fn passability_catches_the_sealed_tunnel_that_shipped() {
+        let structure = |pos: Vec3, size: Vec3| WorldBlock {
+            pos, size, rot: Quat::IDENTITY, friction: 0.3, kind: BlockKind::Structure,
+        };
+        let mut blocks = vec![
+            // Hillside: buries the tunnel floor, so the walkable surface is y=1.0.
+            WorldBlock {
+                pos: Vec3::new(18.0, 0.5, -8.0),
+                size: Vec3::new(12.0, 1.0, 20.0),
+                rot: Quat::IDENTITY, friction: 0.6, kind: BlockKind::Terrain,
+            },
+            structure(Vec3::new(22.0, 0.8, -6.0), Vec3::new(3.0, 0.1, 8.0)),   // floor
+            structure(Vec3::new(20.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0)),   // left wall
+            structure(Vec3::new(23.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0)),   // right wall
+            structure(Vec3::new(22.0, 3.2, -6.0), Vec3::new(3.0, 0.3, 8.0)),   // ceiling
+        ];
+        // The three timber frames, crossbeam underside at y = 3.0 - 0.125 = 2.875.
+        for z in [-3.0, -6.0, -9.0] {
+            blocks.push(structure(Vec3::new(20.8, 1.8, z), Vec3::new(0.25, 2.0, 0.25)));
+            blocks.push(structure(Vec3::new(23.2, 1.8, z), Vec3::new(0.25, 2.0, 0.25)));
+            blocks.push(structure(Vec3::new(22.0, 3.0, z), Vec3::new(2.8, 0.25, 0.25)));
+        }
+        let tunnel = InteriorVolume {
+            name: "mine tunnel",
+            aabb: Aabb {
+                min: Vec3::new(20.7, 0.85, -10.0),
+                max: Vec3::new(23.3, 3.05, -2.0),
+            },
+            entrance: Vec3::new(22.0, 2.0, -2.5),
+            must_reach: vec![("floor by the ore vein", Vec3::new(22.0, 2.0, -9.0))],
+        };
+
+        // Headroom is 2.875 - 1.000 = 1.875m against a 2.0m capsule.
+        let p = check_passability(&tunnel, &blocks);
+        assert!(
+            !p.reachable[0].2,
+            "the sealed tunnel must be detected — 1.875m headroom cannot pass a \
+             {CAPSULE_TOTAL_HEIGHT}m capsule"
+        );
+
+        // And the shipped fix (crossbeams 3.0 -> 3.45, ceiling 3.2 -> 3.65) opens it.
+        let mut fixed = blocks.clone();
+        for b in fixed.iter_mut() {
+            if b.size == Vec3::new(2.8, 0.25, 0.25) {
+                b.pos.y = 3.45;
+            } else if b.size == Vec3::new(3.0, 0.3, 8.0) {
+                b.pos.y = 3.65;
+            }
+        }
+        let opened = InteriorVolume {
+            aabb: Aabb { max: Vec3::new(23.3, 3.50, -2.0), ..tunnel.aabb },
+            ..tunnel.clone()
+        };
+        assert!(
+            check_passability(&opened, &fixed).reachable[0].2,
+            "the shipped fix must open the tunnel"
+        );
+    }
+
+    /// The interior-intrusion check does NOT see this — recorded so nobody
+    /// concludes the two checks are redundant and deletes one.
+    #[test]
+    fn intrusion_check_is_blind_to_structure_blockage() {
+        let beam = WorldBlock {
+            pos: Vec3::new(22.0, 3.0, -3.0),
+            size: Vec3::new(2.8, 0.25, 0.25),
+            rot: Quat::IDENTITY, friction: 0.2,
+            kind: BlockKind::Structure,
+        };
+        let tunnel = Aabb {
+            min: Vec3::new(20.7, 0.85, -10.0),
+            max: Vec3::new(23.3, 3.05, -2.0),
+        };
+        // It physically overlaps the interior...
+        assert!(beam.aabb().overlap_extent(&tunnel).is_some());
+        // ...but is filtered out of the intrusion check by kind, which is why
+        // passability had to be a separate check against ALL blocks.
+        assert_ne!(beam.kind, BlockKind::Terrain);
+    }
+
+    /// A volume too short to stand up in must not pass. Guards the bug where the
+    /// vertical inset used CAPSULE_RADIUS instead of half the TOTAL height.
+    #[test]
+    fn volume_shorter_than_the_capsule_is_impassable() {
+        let short = InteriorVolume {
+            name: "crawlspace",
+            aabb: Aabb { min: Vec3::new(0.0, 0.0, 0.0), max: Vec3::new(4.0, 1.5, 4.0) },
+            entrance: Vec3::new(0.5, 0.0, 0.5),
+            must_reach: vec![("far corner", Vec3::new(3.5, 0.0, 3.5))],
+        };
+        let p = check_passability(&short, &[]);
+        assert!(!p.entrance_usable, "1.5m of headroom cannot fit a 2m capsule");
+    }
+
+    /// A capsule standing ON the floor must be able to traverse. Guards the bug
+    /// where forbidden intervals excluded the exact resting contact and declared
+    /// every floor unstandable.
+    #[test]
+    fn standing_on_a_floor_is_passable() {
+        let floor = WorldBlock {
+            pos: Vec3::new(0.0, -0.5, 0.0),
+            size: Vec3::new(10.0, 1.0, 10.0),
+            rot: Quat::IDENTITY, friction: 0.5, kind: BlockKind::Terrain,
+        };
+        let room = InteriorVolume {
+            name: "room",
+            aabb: Aabb { min: Vec3::new(-4.0, 0.0, -4.0), max: Vec3::new(4.0, 3.0, 4.0) },
+            entrance: Vec3::new(-3.0, 1.0, -3.0),
+            must_reach: vec![("far side", Vec3::new(3.0, 1.0, 3.0))],
+        };
+        let p = check_passability(&room, &[floor]);
+        assert!(p.entrance_usable, "standing on the floor must be legal");
+        assert!(p.reachable[0].2, "an empty room must be traversable");
+    }
+
+    /// A single prop dropped in a doorway seals a room — the third class this
+    /// check buys, beyond the sealed tunnel and the 25mm margin.
+    #[test]
+    fn a_prop_in_the_doorway_is_caught() {
+        let wall = |pos: Vec3, size: Vec3| WorldBlock {
+            pos, size, rot: Quat::IDENTITY, friction: 0.2, kind: BlockKind::Structure,
+        };
+        let room = InteriorVolume {
+            name: "room",
+            aabb: Aabb { min: Vec3::new(-2.0, 0.0, -2.0), max: Vec3::new(2.0, 3.0, 2.0) },
+            entrance: Vec3::new(0.0, 1.0, 1.5),
+            must_reach: vec![("back", Vec3::new(0.0, 1.0, -1.5))],
+        };
+        // A partition across the middle with a 1m gap at x in [-0.5, 0.5].
+        let blocks = vec![
+            wall(Vec3::new(-1.5, 1.5, 0.0), Vec3::new(1.0, 3.0, 0.3)),
+            wall(Vec3::new(1.5, 1.5, 0.0), Vec3::new(1.0, 3.0, 0.3)),
+        ];
+        assert!(check_passability(&room, &blocks).reachable[0].2, "gap should be passable");
+
+        // Park a full-height obstruction in the gap: now there is no route.
+        let mut blocked = blocks.clone();
+        blocked.push(WorldBlock {
+            pos: Vec3::new(0.0, 1.5, 0.0),
+            size: Vec3::new(1.2, 3.0, 1.0),
+            rot: Quat::IDENTITY, friction: 0.4, kind: BlockKind::Prop,
+        });
+        assert!(
+            !check_passability(&room, &blocked).reachable[0].2,
+            "a full-height obstruction in the only doorway must seal the room"
+        );
+    }
+
+
+    /// DOCUMENTED LIMITATION, pinned so it is discovered here and not in an
+    /// incident: passability asks "can a capsule OCCUPY these connected
+    /// columns", and does NOT model vertical traversal. A waist-high crate in an
+    /// open room reads as PASSABLE, because a capsule can occupy the column by
+    /// standing on top of the crate — even though STEP_HEIGHT is 0.1m and a
+    /// player would actually have to jump.
+    ///
+    /// This is acceptable for what the check is for: real seals (support beams,
+    /// blocked doorways) have a lintel or ceiling close above, so there is no
+    /// room to stand on them. But it means a GREEN result is not proof of
+    /// reachability — it is proof that no capsule-height barrier spans the route.
+    /// Modelling step-up and jump arcs is a navmesh problem and deliberately out
+    /// of scope.
+    #[test]
+    fn known_limitation_low_obstacle_reads_as_passable() {
+        let room = InteriorVolume {
+            name: "room",
+            aabb: Aabb { min: Vec3::new(-2.0, 0.0, -2.0), max: Vec3::new(2.0, 3.0, 2.0) },
+            entrance: Vec3::new(0.0, 1.0, 1.5),
+            must_reach: vec![("back", Vec3::new(0.0, 1.0, -1.5))],
+        };
+        // Waist-high crate spanning the full width of the room.
+        let crate_ = WorldBlock {
+            pos: Vec3::new(0.0, 0.5, 0.0),
+            size: Vec3::new(4.0, 1.0, 1.0),
+            rot: Quat::IDENTITY, friction: 0.4, kind: BlockKind::Prop,
+        };
+        assert!(
+            check_passability(&room, &[crate_]).reachable[0].2,
+            "documenting current behaviour: a low obstacle with headroom above it \
+             is treated as passable. If this ever starts failing, someone has \
+             added vertical-traversal modelling — update this test and the \
+             module docs rather than deleting it."
+        );
+    }
+
     /// Proves the checker has teeth: a guard nobody has seen fail is
     /// indistinguishable from one wired to `true`. Reconstructs the exact bug
     /// shipped to production — a spawn point buried in the NW boulder cluster.
@@ -526,12 +1021,9 @@ mod tunnel_diagnosis {
     /// Run with: cargo test --lib tunnel_report -- --nocapture --ignored
     #[test]
     #[ignore = "diagnostic, not a check"]
-    fn tunnel_report() {
+    fn volume_report() {
         let blocks = world_blocks();
-        let tunnel = interior_volumes()
-            .into_iter()
-            .find(|v| v.name == "mine tunnel")
-            .unwrap();
+        for tunnel in interior_volumes() {
 
         println!("\n=== TUNNEL INTERIOR {:?} .. {:?} ===", tunnel.aabb.min, tunnel.aabb.max);
         println!("--- ALL blocks overlapping the interior (any kind) ---");
@@ -573,8 +1065,14 @@ mod tunnel_diagnosis {
             .map(|b| b.aabb().max.y)
             .fold(tunnel.aabb.min.y, f32::max);
         println!(
-            "\nEffective floor y={:.2}, ceiling y={:.2} -> headroom {:.2}m (capsule needs {CAPSULE_TOTAL_HEIGHT}m)",
-            floor_top, tunnel.aabb.max.y, tunnel.aabb.max.y - floor_top
+            "\nHighest blocker top y={:.2}, volume ceiling y={:.2}",
+            floor_top, tunnel.aabb.max.y
         );
+        let p = check_passability(&tunnel, &blocks);
+        println!("entrance {:?} usable: {}", tunnel.entrance, p.entrance_usable);
+        for (name, at, ok) in p.reachable {
+            println!("  reach '{name}' at {at:?}: {}", if ok { "YES" } else { "NO" });
+        }
+        }
     }
 }
