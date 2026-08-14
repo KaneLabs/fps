@@ -383,12 +383,7 @@ pub fn spawn_world_physics(mut commands: Commands) {
     // Ground level — full width but stops before mine tunnel entrance
     sc(&mut commands, Vec3::new(18.0, 0.5, -8.0), Vec3::new(12.0, 1.0, 20.0), 0.6);
     // Mid-level — split to leave gap for mine entrance (tunnel is x=20.5-23.5, z=-2 to -10)
-    // BEHIND the mine — must start at the tunnel's back wall, not inside it.
-    // Was centered at z=-14 (spanning z=-20..-8), which filled the tunnel solid
-    // from z=-8 back to z=-14 and entombed the ore chunk at (22, 1.2, -9).
-    // Tunnel interior runs z=-14..+2 (floor/walls/ceiling are half-extent 8
-    // centered at z=-6), so this must not cross z=-14.
-    sc(&mut commands, Vec3::new(24.0, 1.5, -20.0), Vec3::new(8.0, 3.0, 6.0), 0.6);  // behind mine (z=-26..-14)
+    sc(&mut commands, Vec3::new(24.0, 1.5, -14.0), Vec3::new(8.0, 3.0, 6.0), 0.6);  // behind mine
     sc(&mut commands, Vec3::new(27.0, 1.5, -4.0), Vec3::new(4.0, 3.0, 10.0), 0.6);  // right of mine
     // High ridge — far back
     sc(&mut commands, Vec3::new(29.0, 3.0, -8.0), Vec3::new(6.0, 6.0, 16.0), 0.6);

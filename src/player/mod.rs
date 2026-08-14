@@ -35,7 +35,10 @@ pub const PLAYER_SPAWN_POS: Vec3 = Vec3::new(0.0, 1.5, 5.0);
 pub const SPAWN_POINTS: &[Vec3] = &[
     Vec3::new(0.0, 1.5, 5.0),      // Cabin porch (default spawn)
     Vec3::new(-14.0, 1.2, 2.0),    // Inside the equipment shed
-    Vec3::new(19.0, 1.5, -2.0),    // Outside mine entrance
+    // Ground here is y=1.0; capsule centre needs 1.0m clearance, so 1.5 put
+    // the player 0.5m inside the eastern hillside — same defect class as the
+    // two boulder spawns, found by the world-geometry validator.
+    Vec3::new(19.0, 2.0, -2.0),    // Outside mine entrance (ground y=1.0)
     Vec3::new(-7.5, 4.8, -7.5),    // Watchtower platform
     Vec3::new(3.0, 1.0, 10.0),     // Campfire area
     // NOTE: both rock spawns sit ON boulders. The capsule is 2.0m tall
