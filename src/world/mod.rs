@@ -473,20 +473,20 @@ pub fn spawn_world_physics(mut commands: Commands) {
     sc(&mut commands, Vec3::new(22.0, 0.8, -6.0), Vec3::new(3.0, 0.1, 8.0), 0.4);
 
     // Mine tunnel left wall
-    sc(&mut commands, Vec3::new(20.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0), 0.3);
+    sc(&mut commands, Vec3::new(20.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
     // Mine tunnel right wall
-    sc(&mut commands, Vec3::new(23.5, 2.0, -6.0), Vec3::new(0.4, 2.4, 8.0), 0.3);
+    sc(&mut commands, Vec3::new(23.5, 2.225, -6.0), Vec3::new(0.4, 2.85, 8.0), 0.3);
     // Mine tunnel ceiling
-    sc(&mut commands, Vec3::new(22.0, 3.2, -6.0), Vec3::new(3.0, 0.3, 8.0), 0.3);
+    sc(&mut commands, Vec3::new(22.0, 3.65, -6.0), Vec3::new(3.0, 0.3, 8.0), 0.3);
 
     // Mine support beams (timber frames at intervals)
     for z_off in [-3.0, -6.0, -9.0] {
         // Left post
-        sc(&mut commands, Vec3::new(20.8, 1.8, z_off), Vec3::new(0.25, 2.0, 0.25), 0.2);
+        sc(&mut commands, Vec3::new(20.8, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
         // Right post
-        sc(&mut commands, Vec3::new(23.2, 1.8, z_off), Vec3::new(0.25, 2.0, 0.25), 0.2);
+        sc(&mut commands, Vec3::new(23.2, 2.225, z_off), Vec3::new(0.25, 2.85, 0.25), 0.2);
         // Cross beam
-        sc(&mut commands, Vec3::new(22.0, 3.0, z_off), Vec3::new(2.8, 0.25, 0.25), 0.2);
+        sc(&mut commands, Vec3::new(22.0, 3.45, z_off), Vec3::new(2.8, 0.25, 0.25), 0.2);
     }
 
     // Mine entrance overhang (rock face)
