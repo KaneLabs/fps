@@ -298,7 +298,7 @@ impl Plugin for ProtocolPlugin {
 // is back and this needs data, not another guess.
 fn position_should_rollback(this: &Position, that: &Position) -> bool {
     let err = (this.0 - that.0).length();
-    if err >= 3.0 {
+    if err >= 0.5 {
         // Log magnitude so playtests can attribute corrections.
         bevy::log::info!("[ROLLBACK] Position error {err:.2}m (client {:?} vs server {:?})", this.0, that.0);
         return true;
