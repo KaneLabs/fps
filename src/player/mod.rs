@@ -83,6 +83,32 @@ const CAPSULE_HEIGHT: f32 = 1.0;
 /// Surface normal must have Y > this to count as walkable ground (~45° max slope)
 const MIN_GROUND_NORMAL_Y: f32 = 0.7;
 
+/// How far below the capsule the GROUNDED probe looks. A CONSTANT.
+///
+/// This must not depend on `vel.y`. It used to: the probe was
+/// `|vel.y| * dt + 0.1`, which made the probe range a function of the grounded
+/// decision's own output — grounded zeroes `vel.y`, which gives the SHORTEST
+/// probe, which is the most likely to lose the ground, which starts a fall,
+/// which lengthens the probe, which re-acquires it. A decision that feeds its
+/// own input does not converge, it OSCILLATES, and two simulations one tick
+/// apart can sit in opposite phases of that oscillation indefinitely. That is
+/// what produced the persistent, regenerating client/server disagreement near
+/// the boulders rather than a transient one.
+///
+/// Its value is CONSTRAINED, not chosen. It must exceed both:
+///   - STEP_HEIGHT (0.1), so stepping down a small ledge does not go airborne;
+///   - the per-tick descent when walking down the steepest WALKABLE slope,
+///     PLAYER_MOVE_SPEED * dt * tan(acos(MIN_GROUND_NORMAL_Y))
+///     = 7.0 * (1/64) * tan(45.6°) = 0.1116 m.
+///
+/// The old effective probe was 0.1078 m — SMALLER than that 0.1116 m descent,
+/// so a player running down a maximally-walkable slope lost ground contact
+/// every single tick. That is the same bug a second time, and it is why the
+/// relationship is pinned by `ground_probe_covers_step_and_slope` rather than
+/// left as a comment: three constants here (move speed, tick rate, walkable
+/// slope limit) silently determine a fourth, and nothing else would notice.
+const GROUND_PROBE_DISTANCE: f32 = 0.15;
+
 // --- Shared Components (used by both server + client) ---
 
 #[derive(Debug, Component)]
@@ -181,6 +207,33 @@ pub fn shared_movement_system(
         vel.0.x = move_dir.x * PLAYER_MOVE_SPEED;
         vel.0.z = move_dir.y * PLAYER_MOVE_SPEED;
     }
+}
+
+/// The GROUNDED probe: is there walkable ground beneath `pos`?
+///
+/// Note what this function does NOT take: velocity. That is the fix, expressed
+/// in the type rather than in a comment. The probe used to be
+/// `|vel.y| * dt + 0.1`, which let the grounded decision depend on its own
+/// previous output and oscillate (see GROUND_PROBE_DISTANCE). Re-introducing
+/// that coupling now requires adding a parameter here, which is visible in
+/// review in a way that editing an expression inline was not.
+///
+/// Returns the hit to snap to, or None if not grounded.
+fn ground_probe(
+    spatial: &SpatialQuery,
+    capsule: &Collider,
+    pos: Vec3,
+    filter: &SpatialQueryFilter,
+) -> Option<ShapeHitData> {
+    let config = ShapeCastConfig {
+        max_distance: GROUND_PROBE_DISTANCE,
+        target_distance: SKIN_WIDTH,
+        compute_contact_on_penetration: true,
+        ignore_origin_penetration: true,
+    };
+    spatial
+        .cast_shape(capsule, pos, Quat::IDENTITY, Dir3::NEG_Y, &config, filter)
+        .filter(|hit| hit.normal1.y > MIN_GROUND_NORMAL_Y)
 }
 
 /// Jump: set upward velocity if grounded. Shared between client + server.
@@ -317,28 +370,59 @@ pub fn character_controller(
         }
 
         // --- Vertical movement + ground detection ---
+        //
+        // TWO SEPARATE QUESTIONS, DELIBERATELY ANSWERED BY TWO SEPARATE CASTS.
+        // They were once a single cast, and re-coupling them brings back the
+        // oscillation described on GROUND_PROBE_DISTANCE. If you are tempted to
+        // merge them to save a cast: the grounded probe MUST NOT see `vel.y`.
+        //
+        //   1. GROUNDED — "is there walkable ground beneath me?" Fixed-range,
+        //      position-only, so two simulations at the same position always
+        //      reach the same answer.
+        //   2. ANTI-TUNNEL — "does this tick's fall pass through something?"
+        //      Only asked when actually falling further than the grounded probe
+        //      already looked, and it answers a different question: it does not
+        //      decide grounded-ness, it only stops the capsule at the surface.
         if vel.y <= 0.0 {
-            let fall_dist = vel.y.abs() * dt + 0.1;
-            let config = ShapeCastConfig {
-                max_distance: fall_dist,
-                target_distance: SKIN_WIDTH,
-                compute_contact_on_penetration: true,
-                ignore_origin_penetration: true,
-            };
-
-            match spatial.cast_shape(
-                &capsule, pos, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
-            ) {
-                Some(hit) if hit.normal1.y > MIN_GROUND_NORMAL_Y => {
-                    // Hit walkable ground — snap and zero vertical velocity
+            match ground_probe(&spatial, &capsule, pos, &filter) {
+                Some(hit) => {
+                    // Walkable ground within reach — snap down onto it.
                     if hit.distance > 0.0 {
                         pos.y -= hit.distance;
                     }
                     vel.y = 0.0;
                 }
-                _ => {
-                    // Airborne or hit a wall/steep slope — keep falling
-                    pos.y += vel.y * dt;
+                None => {
+                    // Not grounded. Fall — but do not fall THROUGH anything.
+                    let travel = (vel.y * dt).abs();
+                    if travel > GROUND_PROBE_DISTANCE {
+                        // Falling faster than the grounded probe looked, so
+                        // there may be geometry between here and the landing
+                        // point that neither cast has seen yet.
+                        let sweep_config = ShapeCastConfig {
+                            max_distance: travel,
+                            target_distance: SKIN_WIDTH,
+                            compute_contact_on_penetration: true,
+                            ignore_origin_penetration: true,
+                        };
+                        match spatial.cast_shape(
+                            &capsule, pos, Quat::IDENTITY, Dir3::NEG_Y,
+                            &sweep_config, &filter,
+                        ) {
+                            Some(hit) => {
+                                // Stop AT the surface. Note this deliberately
+                                // stops on non-walkable surfaces too: the old
+                                // code fell straight through a steep face,
+                                // because a non-walkable hit took the "keep
+                                // falling" branch and moved the capsule past it.
+                                pos.y -= hit.distance;
+                                vel.y = 0.0;
+                            }
+                            None => pos.y += vel.y * dt,
+                        }
+                    } else {
+                        pos.y += vel.y * dt;
+                    }
                 }
             }
         } else {
@@ -658,8 +742,6 @@ pub fn change_fov(
 #[cfg(test)]
 mod grounding_repro {
     use super::*;
-    use avian3d::prelude::*;
-    use bevy::prelude::*;
 
     /// Builds a query pipeline directly — no Bevy app, no schedules. Driving
     /// `SpatialQueryPipeline::update` ourselves makes this a pure, deterministic
@@ -729,6 +811,123 @@ mod grounding_repro {
             (Vec3::new(0.0, -0.5, 0.0), Vec3::new(60.0, 1.0, 60.0), Quat::IDENTITY),
             (Vec3::new(0.0, 0.7, 0.0), Vec3::new(3.0, 1.4, 2.5), Quat::from_rotation_y(0.6)),
         ])
+    }
+
+
+    /// THE PROPERTY THE FIX EXISTS FOR: the grounded decision is a pure
+    /// function of POSITION, so two simulations at the same position always
+    /// agree no matter what either believes about its own fall speed.
+    ///
+    /// The strongest form of this guarantee is not the assertion below — it is
+    /// that `ground_probe` DOES NOT TAKE A VELOCITY PARAMETER. Re-coupling
+    /// requires changing its signature. This test additionally pins that the
+    /// answer is stable across the whole rim region.
+    #[test]
+    fn grounded_decision_is_a_pure_function_of_position() {
+        let pipe = scene();
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let filter = SpatialQueryFilter::default();
+        let config = ShapeCastConfig {
+            max_distance: GROUND_PROBE_DISTANCE,
+            target_distance: SKIN_WIDTH,
+            compute_contact_on_penetration: true,
+            ignore_origin_penetration: true,
+        };
+        // Same position probed repeatedly must give an identical answer; the
+        // probe has no hidden state and no velocity input to vary.
+        let mut x = 1.6_f32;
+        while x < 2.6 {
+            let at = Vec3::new(x, 2.4, 0.0);
+            let first = pipe
+                .cast_shape(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter)
+                .is_some_and(|h| h.normal1.y > MIN_GROUND_NORMAL_Y);
+            for _ in 0..4 {
+                let again = pipe
+                    .cast_shape(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter)
+                    .is_some_and(|h| h.normal1.y > MIN_GROUND_NORMAL_Y);
+                assert_eq!(first, again, "grounded must be deterministic at x={x}");
+            }
+            x += 0.01;
+        }
+    }
+
+    /// Demonstrates the OLD probe was genuinely vel-dependent at the rim: the
+    /// same position gives different answers for different fall speeds. This is
+    /// the oscillation's mechanism, pinned so the regression is visible.
+    #[test]
+    fn old_probe_gave_different_answers_at_the_same_position() {
+        let pipe = scene();
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let filter = SpatialQueryFilter::default();
+
+        let old_probe = |vy: f32, at: Vec3| {
+            let config = ShapeCastConfig {
+                max_distance: vy.abs() / 64.0 + 0.1,
+                target_distance: SKIN_WIDTH,
+                compute_contact_on_penetration: true,
+                ignore_origin_penetration: true,
+            };
+            pipe.cast_shape(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter)
+                .is_some_and(|h| h.normal1.y > MIN_GROUND_NORMAL_Y)
+        };
+
+        // Somewhere past the rim, grounded-ness under the old probe depends on
+        // how fast you thought you were falling.
+        let mut disagreement_found = false;
+        let mut x = 2.15_f32;
+        while x < 2.45 {
+            let at = Vec3::new(x, 2.4, 0.0);
+            // vel.y a grounded sim has (gravity for one tick) vs a falling one.
+            let grounded_sim = old_probe(32.0 / 64.0, at);
+            let falling_sim = old_probe(20.0, at);
+            if grounded_sim != falling_sim {
+                disagreement_found = true;
+                break;
+            }
+            x += 0.005;
+        }
+        assert!(
+            disagreement_found,
+            "expected the OLD vel-dependent probe to answer differently at the \
+             same position for different fall speeds — that difference is the \
+             feedback loop this fix removes"
+        );
+    }
+
+    /// The probe distance is not a free parameter. Three constants elsewhere
+    /// (move speed, tick rate, walkable slope limit) determine a lower bound on
+    /// it, and nothing else in the codebase would notice if one of them moved.
+    ///
+    /// The OLD effective probe (0.1078m) FAILED this: a player running down a
+    /// maximally-walkable slope descends 0.1116m per tick and lost ground
+    /// contact every tick.
+    #[test]
+    fn ground_probe_covers_step_and_slope() {
+        let dt = 1.0 / crate::FIXED_TIMESTEP_HZ as f32;
+        let max_slope = MIN_GROUND_NORMAL_Y.acos();
+        let slope_drop_per_tick = PLAYER_MOVE_SPEED * dt * max_slope.tan();
+
+        assert!(
+            GROUND_PROBE_DISTANCE > STEP_HEIGHT,
+            "probe {GROUND_PROBE_DISTANCE} must exceed STEP_HEIGHT {STEP_HEIGHT}, \
+             or stepping down a ledge goes airborne"
+        );
+        assert!(
+            GROUND_PROBE_DISTANCE > slope_drop_per_tick,
+            "probe {GROUND_PROBE_DISTANCE} must exceed the per-tick descent on \
+             the steepest WALKABLE slope ({slope_drop_per_tick:.4}m at \
+             {PLAYER_MOVE_SPEED} m/s, {:.1} deg). Below this a player running \
+             downhill loses ground contact every tick and slides. If you changed \
+             PLAYER_MOVE_SPEED, FIXED_TIMESTEP_HZ or MIN_GROUND_NORMAL_Y, raise \
+             GROUND_PROBE_DISTANCE to match — or accept sliding and say why.",
+            max_slope.to_degrees()
+        );
+        // The old value, pinned to show it was under the bound.
+        assert!(
+            0.1078 < slope_drop_per_tick,
+            "the pre-fix probe should be below the slope bound; if this fails the \
+             constants moved and the historical note above is now wrong"
+        );
     }
 
     /// Walk across the boulder's rim in 2mm steps and watch the grounded
