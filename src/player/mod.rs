@@ -651,3 +651,168 @@ pub fn change_fov(
         }
     }
 }
+
+// ========================================
+// Grounding bifurcation reproduction
+// ========================================
+#[cfg(test)]
+mod grounding_repro {
+    use super::*;
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+
+    /// Builds a query pipeline directly — no Bevy app, no schedules. Driving
+    /// `SpatialQueryPipeline::update` ourselves makes this a pure, deterministic
+    /// function of the geometry, which is what a diagnosis needs.
+    fn pipeline(blocks: &[(Vec3, Vec3, Quat)]) -> SpatialQueryPipeline {
+        let mut pipe = SpatialQueryPipeline::default();
+        let data: Vec<(Entity, Position, Rotation, Collider, CollisionLayers)> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, (pos, size, rot))| {
+                (
+                    Entity::from_raw_u32(i as u32 + 1).unwrap(),
+                    Position::new(*pos),
+                    Rotation(*rot),
+                    Collider::cuboid(size.x, size.y, size.z),
+                    CollisionLayers::default(),
+                )
+            })
+            .collect();
+        pipe.update(data.iter().map(|(e, p, r, c, l)| (*e, p, r, c, l)));
+        pipe
+    }
+
+    /// The controller's downward probe, at rest: gravity has just been applied so
+    /// vel.y = -GRAVITY/64, giving max_distance = |vel.y|*dt + 0.1.
+    fn ground_config() -> ShapeCastConfig {
+        let vy = GRAVITY / 64.0;
+        ShapeCastConfig {
+            max_distance: vy / 64.0 + 0.1,
+            target_distance: SKIN_WIDTH,
+            compute_contact_on_penetration: true,
+            ignore_origin_penetration: true,
+        }
+    }
+
+    struct Decision {
+        single_grounded: bool,
+        single_normal_y: Option<f32>,
+        multi_grounded: bool,
+        walkable_hits: usize,
+        total_hits: usize,
+    }
+
+    fn decide(pipe: &SpatialQueryPipeline, at: Vec3) -> Decision {
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let filter = SpatialQueryFilter::default();
+        let config = ground_config();
+
+        let single = pipe.cast_shape(
+            &capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter,
+        );
+        let hits = pipe.shape_hits(
+            &capsule, at, Quat::IDENTITY, Dir3::NEG_Y, 16, &config, &filter,
+        );
+        Decision {
+            single_grounded: single.is_some_and(|h| h.normal1.y > MIN_GROUND_NORMAL_Y),
+            single_normal_y: single.map(|h| h.normal1.y),
+            multi_grounded: hits.iter().any(|h| h.normal1.y > MIN_GROUND_NORMAL_Y),
+            walkable_hits: hits.iter().filter(|h| h.normal1.y > MIN_GROUND_NORMAL_Y).count(),
+            total_hits: hits.len(),
+        }
+    }
+
+    /// Flat ground (top y=0) plus a Y-rotated boulder like the NE ridge.
+    fn scene() -> SpatialQueryPipeline {
+        pipeline(&[
+            (Vec3::new(0.0, -0.5, 0.0), Vec3::new(60.0, 1.0, 60.0), Quat::IDENTITY),
+            (Vec3::new(0.0, 0.7, 0.0), Vec3::new(3.0, 1.4, 2.5), Quat::from_rotation_y(0.6)),
+        ])
+    }
+
+    /// Walk across the boulder's rim in 2mm steps and watch the grounded
+    /// predicate. This is the decisive test: does normal.y cross
+    /// MIN_GROUND_NORMAL_Y discontinuously under sub-centimetre motion?
+    #[test]
+    #[ignore = "diagnostic"]
+    fn scan_rim() {
+        let pipe = scene();
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let filter = SpatialQueryFilter::default();
+        let config = ground_config();
+        println!("\n--- crossing the boulder rim, capsule centre y=2.4 (top y=1.4) ---");
+        let mut x = 1.60_f32;
+        let mut prev: Option<bool> = None;
+        while x < 2.60 {
+            let at = Vec3::new(x, 2.4, 0.0);
+            let h = pipe.cast_shape(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter);
+            let grounded = h.is_some_and(|h| h.normal1.y > MIN_GROUND_NORMAL_Y);
+            let flip = prev.is_some_and(|p| p != grounded);
+            println!(
+                "x={x:6.3}  grounded={grounded:<5} {} d={:>8} n.y={:>7}",
+                if flip { "<== FLIP" } else { "        " },
+                h.map(|h| format!("{:.5}", h.distance)).unwrap_or("none".into()),
+                h.map(|h| format!("{:.4}", h.normal1.y)).unwrap_or("none".into()),
+            );
+            prev = Some(grounded);
+            x += 0.002;
+        }
+    }
+
+    /// Dump every hit (distance + normal) so single-cast vs multi-hit can be
+    /// compared directly rather than via a boolean.
+    #[test]
+    #[ignore = "diagnostic"]
+    fn dump_hits() {
+        let pipe = scene();
+        let capsule = Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT);
+        let filter = SpatialQueryFilter::default();
+        let config = ground_config();
+        for x in [1.00_f32, 1.05, 1.06, 1.25, 1.75, 2.5] {
+            let at = Vec3::new(x, 1.0, 0.0);
+            let single = pipe.cast_shape(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, &config, &filter);
+            let hits = pipe.shape_hits(&capsule, at, Quat::IDENTITY, Dir3::NEG_Y, 16, &config, &filter);
+            println!("\nx={x:.2}");
+            match single {
+                Some(h) => println!("  cast_shape : d={:.5} n=({:.3},{:.3},{:.3}) e={:?}",
+                    h.distance, h.normal1.x, h.normal1.y, h.normal1.z, h.entity),
+                None => println!("  cast_shape : none"),
+            }
+            for h in &hits {
+                println!("  shape_hits : d={:.5} n=({:.3},{:.3},{:.3}) e={:?}",
+                    h.distance, h.normal1.x, h.normal1.y, h.normal1.z, h.entity);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn scan_grounding_decision() {
+        let pipe = scene();
+        println!("\n--- BESIDE the boulder, capsule centre y=1.0 (resting on ground y=0) ---");
+        let mut x = 1.0;
+        while x < 3.2 {
+            let d = decide(&pipe, Vec3::new(x, 1.0, 0.0));
+            println!(
+                "x={x:5.2}  single={:<5} normal.y={:>7}  multi={:<5}  hits={} walkable={}",
+                d.single_grounded,
+                d.single_normal_y.map(|v| format!("{v:.3}")).unwrap_or("none".into()),
+                d.multi_grounded, d.total_hits, d.walkable_hits,
+            );
+            x += 0.05;
+        }
+        println!("\n--- ON TOP, capsule centre y=2.4 (rests on boulder top y=1.4) ---");
+        let mut x = 0.0;
+        while x < 2.4 {
+            let d = decide(&pipe, Vec3::new(x, 2.4, 0.0));
+            println!(
+                "x={x:5.2}  single={:<5} normal.y={:>7}  multi={:<5}  hits={} walkable={}",
+                d.single_grounded,
+                d.single_normal_y.map(|v| format!("{v:.3}")).unwrap_or("none".into()),
+                d.multi_grounded, d.total_hits, d.walkable_hits,
+            );
+            x += 0.05;
+        }
+    }
+}
