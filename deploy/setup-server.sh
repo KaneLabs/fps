@@ -57,8 +57,12 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/anima-server
 Restart=always
 RestartSec=5
-# Log every abnormal exit, even ones auto-restart recovers from
-ExecStopPost=/usr/local/bin/anima-crash-log.sh
+# Log every abnormal exit, even ones auto-restart recovers from.
+# The '+' prefix runs this as root rather than as ${GAME_USER}: it must read
+# the root-only webhook config. Keeping the webhook unreadable by the game
+# server matters because a compromised server could otherwise flood the
+# alert channel and drown a real alert.
+ExecStopPost=+/usr/local/bin/anima-crash-log.sh
 
 # Resource limits
 LimitNOFILE=65535
@@ -80,13 +84,84 @@ SyslogIdentifier=${SERVICE_NAME}
 WantedBy=multi-user.target
 EOF
 
+echo "==> Installing alert delivery (webhook push)..."
+# Delivery layer. Reads the webhook URL from config on the box rather than
+# baking it in, so alerting can ship before anyone has supplied a URL, and
+# the URL is never in git or in CI.
+#
+# WHY THIS EXISTS: crash detection without delivery is the least useful
+# place to be — it looks like coverage on a diagram while time-to-detection
+# is actually undefined (it equals "until a human opens a file").
+sudo mkdir -p /etc/anima
+sudo tee /usr/local/bin/anima-alert-notify.sh > /dev/null << 'SCRIPT'
+#!/usr/bin/env bash
+# anima-alert-notify.sh <severity> <message>
+# Pushes an alert to the configured webhook. Silently no-ops when no webhook
+# is configured, so this is safe to install before a URL exists.
+#
+# Invariants:
+#   - NEVER prints the webhook URL (it would land in journald).
+#   - NEVER fails its caller: always exits 0, so a webhook outage cannot
+#     break a systemd stop/failure path and mask the very crash it reports.
+#   - Bounded runtime: curl is capped, so a hung endpoint cannot wedge
+#     service shutdown.
+set -uo pipefail
+
+CONF=/etc/anima/alert-webhook.conf
+[ -r "$CONF" ] || exit 0
+# shellcheck source=/dev/null
+. "$CONF" 2>/dev/null || exit 0
+URL="${ANIMA_ALERT_WEBHOOK:-}"
+[ -n "$URL" ] || exit 0
+
+SEVERITY="${1:-info}"
+MESSAGE="${2:-(no message)}"
+TEXT="[${SEVERITY}] anima $(hostname -s) $(date -u +%FT%TZ) — ${MESSAGE}"
+
+# JSON-escape without depending on python/jq being present.
+esc="${TEXT//\\/\\\\}"
+esc="${esc//\"/\\\"}"
+esc="${esc//$'\n'/ }"
+J="\"${esc}\""
+
+case "$URL" in
+  *hooks.slack.com*)                 BODY="{\"text\":${J}}" ;;
+  *discord.com/api/webhooks*|*discordapp.com/api/webhooks*)
+                                     BODY="{\"content\":${J}}" ;;
+  *)                                 BODY="{\"text\":${J},\"content\":${J}}" ;;
+esac
+
+curl -sS -m 10 -X POST -H 'Content-Type: application/json' \
+     -d "$BODY" "$URL" >/dev/null 2>&1 || true
+exit 0
+SCRIPT
+sudo chmod 700 /usr/local/bin/anima-alert-notify.sh
+sudo chown root:root /usr/local/bin/anima-alert-notify.sh
+
+# Webhook config: root-only. The game server runs as ${GAME_USER}; if it
+# could read this, a compromised server could flood the alert channel and
+# drown a real alert — which matters now that alerting is a security
+# control rather than convenience.
+if [ ! -f /etc/anima/alert-webhook.conf ]; then
+  sudo tee /etc/anima/alert-webhook.conf > /dev/null << 'CONF'
+# Alert delivery webhook. Uncomment and set to enable push alerting.
+# Slack:   https://hooks.slack.com/services/...
+# Discord: https://discord.com/api/webhooks/...
+#ANIMA_ALERT_WEBHOOK="https://..."
+CONF
+fi
+sudo chmod 600 /etc/anima/alert-webhook.conf
+sudo chown root:root /etc/anima/alert-webhook.conf
+
 echo "==> Installing crash alerting hooks..."
 sudo tee /usr/local/bin/anima-crash-log.sh > /dev/null << 'SCRIPT'
 #!/usr/bin/env bash
 # Invoked by systemd ExecStopPost with SERVICE_RESULT / EXIT_CODE / EXIT_STATUS set.
 if [ "${SERVICE_RESULT:-success}" != "success" ]; then
-  echo "$(date -u +%FT%TZ) anima-server abnormal exit: result=${SERVICE_RESULT} code=${EXIT_CODE:-?} status=${EXIT_STATUS:-?}" >> /opt/anima/alerts.log
-  logger -t anima-alert -p daemon.err "anima-server crashed: result=${SERVICE_RESULT} code=${EXIT_CODE:-?} status=${EXIT_STATUS:-?}"
+  MSG="anima-server abnormal exit: result=${SERVICE_RESULT} code=${EXIT_CODE:-?} status=${EXIT_STATUS:-?}"
+  echo "$(date -u +%FT%TZ) ${MSG}" >> /opt/anima/alerts.log
+  logger -t anima-alert -p daemon.err "${MSG}"
+  /usr/local/bin/anima-alert-notify.sh warning "${MSG}" || true
 fi
 SCRIPT
 sudo chmod 755 /usr/local/bin/anima-crash-log.sh
@@ -97,7 +172,7 @@ Description=Anima failure alert for %i
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo "$(date -u +%%FT%%TZ) ANIMA ALERT: %i entered FAILED state (crash loop, start limit hit)" >> /opt/anima/alerts.log; logger -t anima-alert -p daemon.crit "ANIMA ALERT: %i FAILED — crash loop"'
+ExecStart=/bin/sh -c 'MSG="ANIMA ALERT: %i entered FAILED state (crash loop, start limit hit)"; echo "$(date -u +%%FT%%TZ) $MSG" >> /opt/anima/alerts.log; logger -t anima-alert -p daemon.crit "$MSG"; /usr/local/bin/anima-alert-notify.sh critical "$MSG" || true'
 UNIT
 
 sudo touch "${INSTALL_DIR}/alerts.log"
