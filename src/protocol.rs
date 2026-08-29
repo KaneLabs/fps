@@ -253,6 +253,13 @@ impl Plugin for ProtocolPlugin {
             .add_prediction()
             .add_should_rollback(velocity_should_rollback);
 
+        // Non-networked rollback registration. JabCooldown never goes on the
+        // wire — this only gives it a PredictionHistory so lightyear rewinds it
+        // during rollback replay, the way it does for predicted components.
+        // NOT a wire-format change: nothing here alters what client and server
+        // serialize to each other.
+        app.add_rollback::<crate::world::JabCooldown>();
+
         // World object components — replicated, server-authoritative (no prediction)
         app.register_component::<crate::world::DoorState>();
         app.register_component::<crate::world::Equippable>();

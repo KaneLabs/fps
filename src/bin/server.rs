@@ -327,7 +327,10 @@ fn server_shoot_with_lag_comp(
                 hit.entity, hit.distance
             );
             if let Ok((mut health, last_damaged)) = health_query.get_mut(hit.entity) {
-                health.0 -= multiplayer::world::SHOOT_DAMAGE;
+                // Applied via the registry, not the bare constant: damage that
+                // does not flow through DamageSource is damage the on-chain
+                // contributor guard cannot see.
+                health.0 -= multiplayer::world::DamageSource::Hitscan.per_hit_damage();
                 if let Some(mut last) = last_damaged {
                     last.0 = attacker_id.0;
                 }
